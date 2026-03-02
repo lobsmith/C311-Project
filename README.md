@@ -5,4 +5,4 @@ Commands to view and run file in Command Prompt:
 3. Running project:  [to be determined]
 
 ## Abstract
-The general purpose of the program will be to convert a program from a high-level language such as Haskell into machine code. The first step would be to convert the program into executable instructions, which would be equivalent to code written in assembly language. From there, the assembly code would be converted into machine language.
+The general purpose of the program will be to convert a program from a high-level programming language into machine code using Haskell, which is a purely functional programming language. The first step would be to convert the program into executable instructions, which would be equivalent to code written in assembly language. From there, the assembly code would be converted into machine language.
