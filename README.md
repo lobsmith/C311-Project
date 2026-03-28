@@ -119,9 +119,9 @@ Here is a basic layout of the program that will be implemented in Haskell:
     * Determine whether it is an R-type, I-type, or J-type instruction
     * Map operations to their opcode, since this is the first field of every machine language instruction regardless of its type
     * Determine the values of the remaining fields for each instruction (32 bits total for each type), possibly into an integer array based on the type
-      * <u>R-type (6 fields)</u>:	`opcode`      `rs`      `rt`      `rd`      `shamt`      `func`
-      * <u>I-type (4 fields)</u>:	`opcode`      `rs`      `rt`      `immediate`
-      * <u>J-type (2 fields)</u>:	`opcode`      `jump target`
+      * <ins>R-type (6 fields)</ins>:    `opcode`      `rs`      `rt`      `rd`      `shamt`      `func`
+      * <ins>I-type (4 fields)</ins>:    `opcode`      `rs`      `rt`      `immediate`
+      * <ins>J-type (2 fields)</ins>:    `opcode`      `jump target`
   * Write the final translation into a file called `bin_code.txt`
 
 ## Things to Consider (tentative list)
