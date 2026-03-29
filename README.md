@@ -1,11 +1,11 @@
-# C311-Project
+# C311 Project
 Commands to view and run file in Command Prompt:
-1. Clone repository: git clone https://github.com/lobsmith/C311-Project
-2. Enter repository: cd C311-Project
+1. Clone repository: `git clone https://github.com/lobsmith/C311-Project`
+2. Enter repository: `cd C311-Project`
 3. Running project:  [to be determined]
 
 ## Abstract
-The general purpose of the program will be to convert a program from a high-level programming language such as C++ into machine code using Haskell, which is a purely functional programming language. The first step would be to convert the program into executable instructions, which would be equivalent to code written in assembly language. From there, the assembly code would be converted into machine language.
+The general purpose of the program will be to convert basic Python programs into machine code using Haskell, which is a purely functional programming language. The first step would be to convert the program into executable instructions, which would be equivalent to code written in assembly language. From there, the assembly code would be converted into machine language.
 
 ## Haskell as a Language
 ### History & Background
@@ -83,15 +83,16 @@ Within this block, the modified value of `result` is stored in a new variable th
 An `IO` value of any type needs to be converted to its pure form before it can be used. In this program, the `IO Int` value returned by `calculatePower` cannot be displayed directly, so Haskell uses the `<-` symbol to bind the resulting integer to a new variable `funcReturn`, making `funcReturn` a pure `Int` value. In the case of an `IO()` return (which is loosely comparable to a `void` return in C++ or Java), the assignment operator (`=`) can be used. Finally, the final result of the expression (in this case, 2^10) would be displayed using `putStrLn` and `show funcReturn`.
 
 ## Project Design
-As previously stated, this project will be designed to translate straightforward code from a high-level language into machine language, mimicking the function of a compiler or interpreter. The Haskell program will read code from a file written in an undetermined imperative language (will use C++ as an example in this section), and it will extract each line of code and determine the lexemes in each line. From there, the code will begin the complex translation process, of which the result assembly language will be written into a `.s` file. The newly translated assembly code will be read from the `.s` file, and the machine code translation will begin. Once done, the machine code will be written into a second file—this time with a `.txt` extension—which will contain the final translation of the imperative program.
+As previously stated, this project will be designed to translate straightforward code from a high-level language into machine language, mimicking the function of a compiler or interpreter. The Haskell program will read code from a file written in Python, and it will extract each line of code and determine the lexemes in each line. From there, the code will begin the complex translation process, of which the result assembly language will be written into a `.s` file. The newly translated assembly code will be read from the `.s` file, and the machine code translation will begin. Once done, the machine code will be written into a second file—this time with a `.txt` extension—which will contain the final translation of the imperative program.
 
 Here is a basic layout of the program that will be implemented in Haskell:
-* Define all lexemes in C++ programming language
+* Define all lexemes in Python (version 3.14.3)
   * Keywords, i.e.:
     * Data types
-    * Print statements (`print`, `printf`)
-    * Conditional keywords (`if`, `else`, `case`, `switch`, `goto`?)
-    * Loop keywords (`for`, `while`, `do`, `until` if using Ruby)
+    * Print statements (`print`)
+    * Conditional keywords (`if`, `elif`, `else`, `case`)
+    * Loop keywords (`for` and `while` only)
+    * Function keywords (`def`)
   * Operators and reserved symbols
     * Computation, comparison, assignment
   * Delimiters
@@ -101,9 +102,8 @@ Here is a basic layout of the program that will be implemented in Haskell:
     * Float, double
     * Char, string
     * Constants
-    * Pointers
-    * Arrays
-* Read code from C++ file (use the MIPS architecture for assembly language)
+    * Lists, tuples, sets, dictionaries
+* Read code from Python file (use the MIPS architecture for assembly language)
   * Extract each line of code
   * Extract lexemes from each line
   * Determine the operation and assign the appropriate assembly operation, i.e.:
@@ -112,7 +112,7 @@ Here is a basic layout of the program that will be implemented in Haskell:
       * `addi` used when adding one variable to numerical value
     * The imperative '`-`' operator also corresponds to `add` or `addi`, since there are no subtraction instructions in MIPS
   * Distinguish `.data` and `.text` sections of the assembly file during the translation process
-  * Check for comments in C++ code (may replicate in the MIPS program)
+  * Check for comments in Python code (may replicate in the MIPS program)
 * Write the resulting assembly code into a file called `assembly.s`
 * Read code from assembly.s and translate into machine language
   * For each instruction:
@@ -129,13 +129,13 @@ Here is an early list of things to keep in mind during the implementation proces
 * For machine language: distinguish R-type, I-type, and J-type instructions
 * For assembly language: distinguish data and code sections
 * One-to-many correspondence between imperative and assembly operations
-* Determine the type of parsing used in the chosen imperative language
+* Determine the type of parsing used in Python 3.14
 * Determine whether any potential import/include statements translate
-* Determine how to translate print statements with variables
+* Determine how to translate print statements with variables, f-strings, `.format()`
 * Determine how to handle the end of an imperative instruction
 * Need to use labels in assembly language (used for branching)
   * Labels used for `if` statements, loops, functions
-* Could separate fields in each machine language instruction written to `bin_code.txt`?
+* Could separate the fields in each machine language instruction written to `bin_code.txt`?
 * Determine how to assign the appropriate general-purpose registers based on imperative code (could be difficult)
   * `$t0` through `$t9` are temporary registers, `$s0` through `$s7` are saved registers
   * `$v0` and `$v1` are used for function returns
@@ -143,8 +143,9 @@ Here is an early list of things to keep in mind during the implementation proces
   * `$ra` used for the return address of `jal` (jump and link) instructions
   * Can use register `$zero` (or `$0`) to denote the value of 0
 * Possible display concerns:
-  * Determine how to handle float printing with numerical format specifiers (i.e. how to extract the number from `%.2f` in a `printf` statement)
+  * Determine how to handle float printing with numerical format specifiers (i.e. how to extract the number from `%.2f` in a `.format()` statement)
   * Determine how to handle string literals and escape sequences (i.e. '`\n`' and '`\t`')
+  * Determine how to handle f-strings
 * Determine whether two `.hs` files should be used for the project
   * One file to translate from imperative to assembly language
   * One file to translate from assembly to machine language
