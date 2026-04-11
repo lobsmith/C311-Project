@@ -1,7 +1,7 @@
 -- TESTABLE CASES:
 -- SIMPLE PRINT STATEMENTS WITH STRINGS
 -- DECLARING VARIABLES (int, float, bool, string)
--- SIMPLE TWO-OPERAND ARITHMETIC (+, -, *, /, //, %) (PARTIAL)
+-- SIMPLE TWO-OPERAND ARITHMETIC (+, -, *, /, //, %) (PARTIALLY DONE)
 -- started first steps of conditional statement checking
 -- (will spend significantly more time refining and adding before finished)
 import System.IO                            -- needed for OpenFile
@@ -12,6 +12,7 @@ import Data.List.Split (splitOn)            -- needed for string extraction (con
 import Data.Char (isSpace)                  -- needed to trim leading and trailing white space
 import Data.Char (isPunctuation, isSymbol, isDigit)  -- needed to check for special characters
 import Data.Typeable                        -- needed to determine the type of a variable (using PyVar)
+import Debug.Trace (trace)                  -- used for debugging
 import qualified Data.Text as T             -- (breakOn, append, drop, length)
 import Control.Monad(unless)                -- needed for function loop
 import Text.Read (readMaybe)
@@ -63,14 +64,14 @@ extractString trimmed = do
     let extracted1 = noTrailingSpace extracted
     return (init extracted1)
 
--- extract variable name and value
+-- function that extracts variable name and value
 extractVariable :: String -> Maybe (String, PyVar)
 extractVariable trimmed = case words trimmed of
     (var : eq : rest) | eq == "=" && isValidName var -> 
         Just (var, parseValue (unwords rest))
     _ -> Nothing
 
--- extract both operands and operator from an expression
+-- function that extracts both operands and operator from an expression
 extractOperands :: String -> Maybe (String, String, String, PyArith, PyVar)
 extractOperands trimmed = 
   let w = words trimmed in
@@ -89,7 +90,7 @@ extractOperands trimmed =
             Nothing -> Nothing
     _ -> Nothing
     
--- parse value string to PyVar (int, float, bool, string types)
+-- function that parses value string to PyVar (int, float, bool, string types)
 parseValue :: String -> PyVar
 parseValue val =
   let raw = val
@@ -114,7 +115,7 @@ parseValue val =
         then PyStr (take (length trimmed - 2) (drop 1 trimmed))
         else Unknown
 
--- parse Python arithmetic operators (used for computation)
+-- function that parses Python arithmetic operators (used for computation)
 parseArith :: String -> Maybe PyArith
 parseArith op = 
   case op of
@@ -126,7 +127,7 @@ parseArith op =
     "%"  -> Just PyMod
     _    -> Nothing
 
--- parse Python comparison operators (used in conditional statements)
+-- function that parses Python comparison operators (used in conditional statements)
 parseCompare :: String -> Maybe PyCompare
 parseCompare op = 
   case op of
@@ -267,7 +268,7 @@ loop h mipsData mipsCode strCount tregCount fregCount = do
                 else do putStr $ ""
             
         -- trim whitespace and find whether "print" is a prefix of the full string
-        let isPrint = "print(" `isPrefixOf` trimmedLine && not (isSpecial trimmedLine 6)    -- trim whitespace and find whether "print" is a prefix of the full string
+        let isPrint = "print(" `isPrefixOf` trimmedLine && not (isSpecial trimmedLine 6)
         let isVar = "=" `isInfixOf` trimmedLine && not (isPrint) -- CHECK IF INFIX CHECK IS REDUNDANT
         let isArith = if (not(isPrint) && not(isVar)) then True
                       else False -- BAND-AID SOLUTION, WILL MODIFY WHEN MORE STATEMENTS ARE TESTED
@@ -327,10 +328,12 @@ loop h mipsData mipsCode strCount tregCount fregCount = do
                 -- translate function return statement
                 putStrLn $ "Function return (code abstracted)"
             -1 -> do
+                -- display "untestable operation" message if line is not empty
                 if (not(isEmpty trimmedLine)) then
                     putStrLn $ "Encountered invalid/untested operation"
                 else return()
             _ -> do
+                -- display error message (statement should not be reachable due to prior checking)
                 putStrLn $ "Computation error"
         
         -- move to the next line using recursion
