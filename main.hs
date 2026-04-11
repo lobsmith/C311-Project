@@ -1,4 +1,9 @@
--- FULL PROGRAM FOR TRANSLATING MULTIPLE SIMPLE PRINT STATEMENTS AND DECLARING VARIABLES (int, float, bool, string)
+-- TESTABLE CASES:
+-- SIMPLE PRINT STATEMENTS WITH STRINGS
+-- DECLARING VARIABLES (int, float, bool, string)
+-- SIMPLE TWO-OPERAND ARITHMETIC (+, -, *, /, //, %) (PARTIAL)
+-- started first steps of conditional statement checking
+-- (will spend significantly more time refining and adding before finished)
 import System.IO                            -- needed for OpenFile
 import Data.List (isPrefixOf, isInfixOf)    -- needed to identify leading keywords ("print") and assignment operator
 import Data.List (delete, stripPrefix)      -- delete removes first occurrence of substring
@@ -7,19 +12,30 @@ import Data.List.Split (splitOn)            -- needed for string extraction (con
 import Data.Char (isSpace)                  -- needed to trim leading and trailing white space
 import Data.Char (isPunctuation, isSymbol, isDigit)  -- needed to check for special characters
 import Data.Typeable                        -- needed to determine the type of a variable (using PyVar)
-import qualified Data.Text as T             -- (breakOn, append, drop, length) - [CHECK USE IN PROGRAM AND WHICH COMMANDS IT UTILIZES]
+import qualified Data.Text as T             -- (breakOn, append, drop, length)
 import Control.Monad(unless)                -- needed for function loop
-import Text.Read (readMaybe)                -- needed for [ADD COMMENT]
+import Text.Read (readMaybe)
 
--- read one line of Python code and return it (CHECK WHETHER THIS FUNCITON IS USED, MIGHT DELETE ENTIRELY)
-readLine :: FilePath -> IO String
-readLine py = do
-    withFile py ReadMode $ \handle -> do
-        line <- hGetLine handle
-        return line
+-- write data constructors to define Python variable types
+data PyVar = PyInt Integer | PyFloat Float | PyBool Bool | PyStr String | Unknown deriving (Eq, Show)
 
--- declare Python variable types
-data PyVar = PyInt Integer | PyFloat Float | PyBool Bool | PyStr String | Unknown deriving Show
+-- write data constructors to define Python operators (arithmetic and comparison)
+data PyArith = PyAdd | PySub | PyMul | PyDiv | PyFloorDiv | PyMod deriving Show
+data PyCompare = PyEq | PyNEq | PyLT | PyLTE | PyGT | PyGTE deriving Show
+
+-- write data constructors to define two-operand Python arithmetic expressions
+data PyExpr = VarDecl String PyVar
+            | ArithAssign String String PyArith PyVar  -- dest = lhs op rhs
+            deriving Show
+
+-- write data constructors to define Python conditional keywords (if, elif, else)
+data PyCondWord = PyIf | PyElif deriving Show
+data PyCondFinal = PyElse deriving Show
+
+-- write data constructors to define simple Python conditional statements
+data PyCondExpr = PyCondWord PyVar PyCompare PyVar      -- i.e. if x == 5, elif y >= x
+                -- | PyCondWord PyVar PyCompare PyVar
+                | PyCondFinal deriving Show     -- else
 
 -- simple function that removes leading whitespace from a line of code
 -- key benefit: helps eliminate indentation when looking for prefix keywords
@@ -53,50 +69,90 @@ extractVariable trimmed = case words trimmed of
     (var : eq : rest) | eq == "=" && isValidName var -> 
         Just (var, parseValue (unwords rest))
     _ -> Nothing
+
+-- extract both operands and operator from an expression
+extractOperands :: String -> Maybe (String, String, String, PyArith, PyVar)
+extractOperands trimmed = 
+  let w = words trimmed in
+  trace ("Input line: '" ++ trimmed ++ "' -> words: " ++ show w) $
+  case w of
+    (dest:eq:lhs:opStr:rhs) 
+      | eq == "=" -> 
+          trace ("opStr='" ++ opStr ++ "'") $
+          case parseArith opStr of
+            Just op -> 
+              let rhsVal = parseValue (unwords rhs) in
+              if rhsVal /= Unknown 
+              then trace ("SUCCESS: " ++ dest ++ " = " ++ lhs ++ " " ++ show op ++ " " ++ show rhsVal) $
+                   Just (dest, lhs, "", op, rhsVal)
+              else Nothing
+            Nothing -> Nothing
+    _ -> Nothing
     
+-- parse value string to PyVar (int, float, bool, string types)
+parseValue :: String -> PyVar
+parseValue val =
+  let raw = val
+      wordsOnly = words val
+      trimmed = if null wordsOnly then "" else head wordsOnly  -- take first word only
+  
+  -- check if boolean
+  in if trimmed == "True" then PyBool True
+  else if trimmed == "False" then PyBool False
+  
+  -- check if integer
+  else case readMaybe trimmed :: Maybe Integer of
+    Just n -> PyInt n
+    -- check if float
+    Nothing -> case readMaybe trimmed :: Maybe Float of
+      Just f -> PyFloat f
+      Nothing -> -- check if string
+        -- strip one pair of quotes from ends
+        if length trimmed >= 2 
+           && (head trimmed == '"' && last trimmed == '"' 
+               || head trimmed == '\'' && last trimmed == '\'')
+        then PyStr (take (length trimmed - 2) (drop 1 trimmed))
+        else Unknown
+
+-- parse Python arithmetic operators (used for computation)
+parseArith :: String -> Maybe PyArith
+parseArith op = 
+  case op of
+    "+"  -> Just PyAdd
+    "-"  -> Just PySub
+    "*"  -> Just PyMul
+    "/"  -> Just PyDiv
+    "//" -> Just PyFloorDiv
+    "%"  -> Just PyMod
+    _    -> Nothing
+
+-- parse Python comparison operators (used in conditional statements)
+parseCompare :: String -> Maybe PyCompare
+parseCompare op = 
+  case op of
+    "==" -> Just PyEq
+    "!=" -> Just PyNEq
+    "<"  -> Just PyLT
+    "<=" -> Just PyLTE
+    ">"  -> Just PyGT
+    ">=" -> Just PyGTE
+    _    -> Nothing
+
+-- function that determines whether variable declaration is valid
+isVarInit :: String -> Bool
+isVarInit trimmed = case words trimmed of
+    (var : eq : _) | eq == "="  -> isValidName var
+    _                           -> False
+
+-- function that determines whether a variable name is valid
+isValidName :: String -> Bool
+isValidName [] = False
+isValidName (char:trimmed)
+    | not (isValidLead char) = False
+    | otherwise = all isValidFollow trimmed
     where
-        -- parse value string to PyVar (int, float, bool, string types)
-        parseValue :: String -> PyVar
-        parseValue val =
-          let raw = val
-              wordsOnly = words val
-              trimmed = if null wordsOnly then "" else head wordsOnly  -- take first word only
-          
-          -- check if boolean
-          in if trimmed == "True" then PyBool True
-          else if trimmed == "False" then PyBool False
-          
-          -- check if integer
-          else case readMaybe trimmed :: Maybe Integer of
-            Just n -> PyInt n
-            -- check if float
-            Nothing -> case readMaybe trimmed :: Maybe Float of
-              Just f -> PyFloat f
-              Nothing -> -- check if string
-                -- Strip EXACTLY one pair of quotes from ends
-                if length trimmed >= 2 
-                   && (head trimmed == '"' && last trimmed == '"' 
-                       || head trimmed == '\'' && last trimmed == '\'')
-                then PyStr (take (length trimmed - 2) (drop 1 trimmed))
-                else Unknown
-        
-        -- determine whether variable declaration is valid
-        isVarInit :: String -> Bool
-        isVarInit trimmed = case words trimmed of
-            (var : eq : _) | eq == "="  -> isValidName var
-            _                           -> False
-        
-        -- determine whether variable name is valid
-        isValidName :: String -> Bool
-        isValidName [] = False
-        isValidName (char:trimmed)
-            | not (isValidLead char) = False
-            | otherwise = all isValidFollow trimmed
-            where
-                isValidLead char = char `elem` ['a'..'z'] ++ ['A'..'Z'] ++ ['_']
-                isValidFollow char = char `elem` ['a'..'z'] ++ ['A'..'Z'] ++ ['_'] ++ ['0'..'9']
-        
-    -- END OF EXTRACT_VARIABLE
+        isValidLead char = char `elem` ['a'..'z'] ++ ['A'..'Z'] ++ ['_']
+        isValidFollow char = char `elem` ['a'..'z'] ++ ['A'..'Z'] ++ ['_'] ++ ['0'..'9']
 
 -- function that checks for special characters in variable declarations at a certain index
 isSpecial :: String -> Int -> Bool
@@ -112,9 +168,6 @@ translatePrint str mData mCode strCount = do
     -- write .data translation
     appendFile mData ("str" ++ show strCount ++ ": .asciiz \"" ++ str ++ "\"\n")
     
-    -- may use or not (YET TO BE DETERMINED)
-    -- let printInstr = ("print(" ++ str ++ ")")
-    
     -- write .text translation
     appendFile mCode ("\tla $a0, str" ++ show strCount ++ "\n" ++ "\tli $v0, 4\n")
     appendFile mCode ("\tsyscall\n\n")
@@ -122,7 +175,7 @@ translatePrint str mData mCode strCount = do
     -- display message to terminal
     putStrLn "translatePrint successful"
 
--- function that translates a variable declaration into MIPS (ONLY INT SO FAR)
+-- function that translates a variable declaration into MIPS
 translateVariable :: String -> PyVar -> FilePath -> FilePath -> Int -> Int -> IO()
 translateVariable name value mData mCode treg freg = do
     -- write .data and .text translation based on variable type
@@ -153,6 +206,11 @@ translateVariable name value mData mCode treg freg = do
     putStrLn "translateVariable successful"
     
     -- END OF TRANSLATE_VARIABLE
+
+-- function that translates a two-operand arithmetic expression into MIPS (SHELL)
+translateExpression :: String -> String -> PyArith -> PyVar -> FilePath -> FilePath -> Int -> Int -> IO()
+translateExpression dest lhs op rhs mData mCode treg freg = do
+    putStrLn "translateExpression successful"
 
 -- MAIN FUNCTION
 main :: IO()
@@ -209,8 +267,12 @@ loop h mipsData mipsCode strCount tregCount fregCount = do
                 else do putStr $ ""
             
         -- trim whitespace and find whether "print" is a prefix of the full string
-        let isPrint = "print(" `isPrefixOf` trimmedLine && not (isSpecial trimmedLine 6)
+        let isPrint = "print(" `isPrefixOf` trimmedLine && not (isSpecial trimmedLine 6)    -- trim whitespace and find whether "print" is a prefix of the full string
         let isVar = "=" `isInfixOf` trimmedLine && not (isPrint) -- CHECK IF INFIX CHECK IS REDUNDANT
+        let isArith = if (not(isPrint) && not(isVar)) then True
+                      else False -- BAND-AID SOLUTION, WILL MODIFY WHEN MORE STATEMENTS ARE TESTED
+        let isFunc = "def " `isPrefixOf` trimmedLine
+        let isFuncReturn = "return " `isPrefixOf` trimmedLine
         
         -- update count variables
         -- strCount used for variable names in MIPS (i.e. str1, str2, str3, etc.)
@@ -225,22 +287,22 @@ loop h mipsData mipsCode strCount tregCount fregCount = do
         -- map a value to each statement type for cleaner evaluation
         let result = if isPrint then 0 
                      else if isVar then 1
-                     -- else if is### then 2
-                     -- else if is### then 3
-                     -- else if is### then 4
-                     -- else if is### then 5
-                     -- else if is### then 6
-                     -- else if is### then 7
-                     -- else if is### then 8
+                     else if isArith then 2
+                     -- else if isCond then 3
+                     -- else if isCase then 4
+                     -- else if isLoop then 5
+                     else if isFunc then 6
+                     else if isFuncReturn then 7
                      else -1
         
         -- translate line into MIPS based on the type of statement
         case result of
             0 -> do
-                -- translate print line into MIPS
+                -- translate print line
                 strLiteral <- extractString trimmedLine
                 translatePrint strLiteral mipsData mipsCode strCount'
             1 -> do
+                -- translate simple variable declaration
                 maybeVar <- pure $ extractVariable trimmedLine
                 case maybeVar of
                     Just (varName, varValue) -> do
@@ -248,11 +310,29 @@ loop h mipsData mipsCode strCount tregCount fregCount = do
                         putStrLn $ "Var: " ++ varName ++ " = " ++ show varValue
                         translateVariable varName varValue mipsData mipsCode tregCount' fregCount' -- varName and varValue now in scope for whole do block
                     Nothing -> return()
+            2 -> do
+                -- translate two-operand arithmetic operations
+                maybeVar <- pure $ extractOperands trimmedLine
+                case maybeVar of
+                    Just (destVar, lhs, rhsVar, op, rhsVal) -> do
+                        -- Use varName and varValue
+                        putStrLn $ "Expression: " ++ destVar ++ " = " ++ show lhs ++ " " ++ show op ++ " " ++ show rhsVal
+                        translateExpression destVar lhs op rhsVal mipsData mipsCode tregCount' fregCount'
+                    Nothing -> return()
+                putStrLn $ "Arithmetic operation (code abstracted)"
+            6 -> do
+                -- translate function header
+                putStrLn $ "Function header (code abstracted)"
+            7 -> do
+                -- translate function return statement
+                putStrLn $ "Function return (code abstracted)"
             -1 -> do
-                putStrLn $ "Encountered invalid/untested operation or empty line"
+                if (not(isEmpty trimmedLine)) then
+                    putStrLn $ "Encountered invalid/untested operation"
+                else return()
             _ -> do
                 putStrLn $ "Computation error"
         
-        -- move to next line (uses recursion)
+        -- move to the next line using recursion
         loop h mipsData mipsCode strCount' tregCount' fregCount'
         
