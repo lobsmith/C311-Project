@@ -36,7 +36,7 @@ Below are translations for the core structures intended to be tested in this pro
 
 ## Variable Declarations
 ### int & bool
-<ins>Example</ins>: `x = 5`
+<ins>Example</ins>: `x = 5`  
 <ins>`.data` translation</ins>:
 ```
     x: .word 5
@@ -111,3 +111,14 @@ Use conditional branch (jump) to a label.
 Use unconditional branch to a label.
 ### Function Header
 ### Function Return
+
+## Exiting the Program
+Two options:
+```
+    ; METHOD #1: JUMP TO RETURN ADDRESS
+    jr $ra        ; return to caller
+    
+    ; METHOD #2: LOAD SERVICE NUMBER INTO $v0
+    li $v0, 10    ; load service number 10 = exit program ("prepare to exit")
+    syscall       ; exit the program (performed here)
+```
