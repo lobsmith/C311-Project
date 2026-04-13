@@ -3,6 +3,7 @@
 -- DECLARING VARIABLES (int, float, bool, string)
 -- SIMPLE TWO-OPERAND ARITHMETIC (+, -, *, /, //, %) (PARTIALLY DONE)
 -- started first steps of conditional statement checking
+-- TESTABLE FRINGE CASES: Python file does not exist or is empty
 -- (will spend significantly more time refining and adding before finished)
 import System.IO                            -- needed for OpenFile
 import Data.List (isPrefixOf, isInfixOf)    -- needed to identify leading keywords ("print") and assignment operator
@@ -15,7 +16,10 @@ import Data.Typeable                        -- needed to determine the type of a
 import Debug.Trace (trace)                  -- used for debugging
 import qualified Data.Text as T             -- (breakOn, append, drop, length)
 import Control.Monad(unless)                -- needed for function loop
-import Text.Read (readMaybe)
+import Text.Read (readMaybe)                -- needed to parse a string into a data type
+import Control.Exception (catch, IOException, throwIO)  -- needed to check empty file
+import System.IO.Error (isDoesNotExistError)    -- neded to throw exception when Python file does not exist
+import System.Exit (exitFailure)            -- needed to terminate the program when an exception is encountered
 
 -- write data constructors to define Python variable types
 data PyVar = PyInt Integer | PyFloat Float | PyBool Bool | PyStr String | Unknown deriving (Eq, Show)
@@ -51,6 +55,39 @@ noTrailingSpace = dropWhileEnd isSpace
 -- simple function that determines whether a line of code is empty
 isEmpty :: String -> Bool
 isEmpty str = all isSpace str
+
+-- function that throws an error if a file is found but empty
+isEmptyFile :: FilePath -> IO()
+isEmptyFile py = do
+    contents <- readFile py
+    if null contents then do    -- ALSO NEED TO CONSIDER SKIPPING COMMENTS
+        putStrLn $ "Empty file exception: " ++ py ++ " was found but is empty."
+        putStrLn $ "Writing .data and .text directives to assembly.s"
+        exitFailure
+    else putStr $ "File " ++ py ++ " is not empty."
+
+-- function that throws an error if a file is not found
+isFile :: FilePath -> IOException -> IO String
+isFile py e
+  | isDoesNotExistError e = do
+      putStrLn $ "isDoesNotExistError: " ++ py ++ " not found, cannot translate code."
+      exitFailure -- terminate the program imediately
+  | otherwise = throwIO e
+
+-- function that writes default code to .data and .text sections (data.txt and code.txt)
+writeMipsDefault :: FilePath -> FilePath -> FilePath -> IO()
+writeMipsDefault mData mCode mFinal = do
+    -- write assembler directives to data.txt and code.txt
+    writeFile mData "\t.data\n"
+    writeFile mCode ("\t.text\n" ++ "\t.globl main\n" ++ "main:\n")
+    mergeMips mData mCode mFinal
+
+-- function that merges code.txt and data.txt into assembly.s (final MIPS file)
+mergeMips :: FilePath -> FilePath -> FilePath -> IO()
+mergeMips mData mCode mFinal = do
+    dataContents <- readFile mData
+    codeContents <- readFile mCode
+    writeFile mFinal (dataContents ++ "\n" ++ codeContents)
 
 -- function that removes code that is not a string literal or a variable
 -- Purpose: to display a string literal or variable in MIPS without the surrounding Python syntax
@@ -228,8 +265,11 @@ main = do
     let fregCount = 0
     
     -- write default code to MIPS data and code sections, separate into two .txt files until done
-    writeFile mipsData "\t.data\n"
-    writeFile mipsCode ("\t.text\n" ++ "\t.globl main\n" ++ "main:\n")
+    writeMipsDefault mipsData mipsCode mipsFinal
+    
+    -- throw error if file is not found or is empty
+    contents <- readFile python `catch` \e -> isFile python e
+    isEmptyFile python
     
     -- open Python file handle for line-by-line reading
     withFile python ReadMode $ \h -> do
@@ -237,12 +277,10 @@ main = do
     putStrLn "\nWriting to data.txt and code.txt successful"
     
     -- write end program logic into code.txt
-    appendFile mipsCode "\tjr $ra"
+    appendFile mipsCode "\n\tjr $ra"
     
     -- merge the two .txt files into assembly.s (FINAL STEP OF THE WHOLE PROGRAM)
-    dataContents <- readFile mipsData
-    codeContents <- readFile mipsCode
-    writeFile mipsFinal (dataContents ++ "\n" ++ codeContents)
+    mergeMips mipsData mipsCode mipsFinal
     putStrLn "Writing to assembly.s successful"
 
 -- WHILE NOT EOF LOOP (continues until end of test.py)
