@@ -64,7 +64,7 @@ isEmptyFile py = do
         putStrLn $ "Empty file exception: " ++ py ++ " was found but is empty."
         putStrLn $ "Writing .data and .text directives to assembly.s"
         exitFailure
-    else putStr $ "File " ++ py ++ " is not empty."
+    else putStrLn $ "File " ++ py ++ " is not empty."
 
 -- function that throws an error if a file is not found
 isFile :: FilePath -> IOException -> IO String
@@ -176,6 +176,12 @@ parseCompare op =
     ">=" -> Just PyGTE
     _    -> Nothing
 
+-- function that renders a numerical operand in an arithmetic expression
+renderOperand :: PyVar -> String
+renderOperand (PyInt i)   = show i
+renderOperand (PyFloat f) = show f
+renderOperand v           = show v
+
 -- function that determines whether variable declaration is valid
 isVarInit :: String -> Bool
 isVarInit trimmed = case words trimmed of
@@ -248,6 +254,29 @@ translateVariable name value mData mCode treg freg = do
 -- function that translates a two-operand arithmetic expression into MIPS (SHELL)
 translateExpression :: String -> String -> PyArith -> PyVar -> FilePath -> FilePath -> Int -> Int -> IO()
 translateExpression dest lhs op rhs mData mCode treg freg = do
+    case op of
+        -- check add operation
+        PyAdd -> do
+            appendFile mCode ("\taddi $t" ++ show treg ++ ", $0, " ++ lhs ++ "\n")
+            let treg' = treg + 1
+            appendFile mCode ("\taddi $t" ++ show treg' ++ ", $t" ++ show treg ++ ", " ++ renderOperand rhs ++ "\n")
+            putStrLn $ "Add operation detected"
+        -- check subtraction operation
+        PySub -> do
+            putStrLn $ "Subtract operation detected"
+        -- check multiply operation
+        PyMul -> do
+            putStrLn $ "Multiply operation detected"
+        -- check divide operation
+        PyDiv -> do
+            putStrLn $ "Divide operation detected"
+        -- check floor divide operation
+        PyFloorDiv -> do
+            putStrLn $ "Floor divide operation detected"
+        -- check modulo operation
+        PyMod -> do
+            putStrLn $ "Modulo operation detected"
+        _     -> putStrLn "Unidentified operation"
     putStrLn "translateExpression successful"
 
 -- MAIN FUNCTION
@@ -307,9 +336,8 @@ loop h mipsData mipsCode strCount tregCount fregCount = do
             
         -- trim whitespace and find whether "print" is a prefix of the full string
         let isPrint = "print(" `isPrefixOf` trimmedLine && not (isSpecial trimmedLine 6)
-        let isVar = "=" `isInfixOf` trimmedLine && not (isPrint) -- CHECK IF INFIX CHECK IS REDUNDANT
-        let isArith = if (not(isPrint) && not(isVar)) then True
-                      else False -- BAND-AID SOLUTION, WILL MODIFY WHEN MORE STATEMENTS ARE TESTED
+        let isArith = any (`isInfixOf` trimmedLine) [" + ", " - ", " * ", " / ", "//", "%"]
+        let isVar = "=" `isInfixOf` trimmedLine && not isPrint && not isArith -- CHECK IF INFIX CHECK IS REDUNDANT
         let isFunc = "def " `isPrefixOf` trimmedLine
         let isFuncReturn = "return " `isPrefixOf` trimmedLine
         
@@ -355,10 +383,9 @@ loop h mipsData mipsCode strCount tregCount fregCount = do
                 case maybeVar of
                     Just (destVar, lhs, rhsVar, op, rhsVal) -> do
                         -- Use varName and varValue
-                        putStrLn $ "Expression: " ++ destVar ++ " = " ++ show lhs ++ " " ++ show op ++ " " ++ show rhsVal
+                        putStrLn $ "Arithmetic expression: " ++ destVar ++ " = " ++ lhs ++ " " ++ show op ++ " " ++ renderOperand rhsVal
                         translateExpression destVar lhs op rhsVal mipsData mipsCode tregCount' fregCount'
                     Nothing -> return()
-                putStrLn $ "Arithmetic operation (code abstracted)"
             6 -> do
                 -- translate function header
                 putStrLn $ "Function header (code abstracted)"
@@ -376,4 +403,3 @@ loop h mipsData mipsCode strCount tregCount fregCount = do
         
         -- move to the next line using recursion
         loop h mipsData mipsCode strCount' tregCount' fregCount'
-        
