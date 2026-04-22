@@ -10,11 +10,11 @@ import Data.List (isPrefixOf, isInfixOf)    -- needed to identify leading keywor
 import Data.List (delete, stripPrefix)      -- delete removes first occurrence of substring
 import Data.List (dropWhileEnd)             -- needed to trim trailing white space
 import Data.List.Split (splitOn)            -- needed for string extraction (concat)
-import Data.Char (isSpace)                  -- needed to trim leading and trailing white space
+import Data.Char (isSpace, toLower)         -- isSpace needed to trim leading and trailing white space, toLower needed for bool variables
 import Data.Char (isPunctuation, isSymbol, isDigit)  -- needed to check for special characters
 import Data.Typeable                        -- needed to determine the type of a variable (using PyVar)
 import Debug.Trace (trace)                  -- used for debugging
-import qualified Data.Text as T             -- (breakOn, append, drop, length)
+import qualified Data.Text as T            -- (breakOn, append, drop, length)
 import Control.Monad(unless)                -- needed for function loop
 import Text.Read (readMaybe)                -- needed to parse a string into a data type
 import Control.Exception (catch, IOException, throwIO)  -- needed to check empty file
@@ -121,7 +121,7 @@ extractOperands trimmed =
             Just op -> 
               let rhsVal = parseValue (unwords rhs) in
               if rhsVal /= Unknown 
-              then trace ("SUCCESS: " ++ dest ++ " = " ++ lhs ++ " " ++ show op ++ " " ++ show rhsVal) $
+              then trace ("SUCCESS: " ++ dest ++ " = " ++ lhs ++ " " ++ show op ++ " " ++ prettyPyVar rhsVal) $
                    Just (dest, lhs, "", op, rhsVal)
               else Nothing
             Nothing -> Nothing
@@ -180,7 +180,18 @@ parseCompare op =
 renderOperand :: PyVar -> String
 renderOperand (PyInt i)   = show i
 renderOperand (PyFloat f) = show f
+renderOperand (PyBool b)  = show b
+renderOperand (PyStr s)   = s
+renderOperand Unknown     = "0"
 renderOperand v           = show v
+
+-- function that extracts the raw value of a variable
+prettyPyVar :: PyVar -> String
+prettyPyVar (PyInt i)    = show i
+prettyPyVar (PyFloat f)  = show f
+prettyPyVar (PyBool b)   = map toLower (show b)
+prettyPyVar (PyStr s)    = s
+prettyPyVar Unknown      = "?"
 
 -- function that determines whether variable declaration is valid
 isVarInit :: String -> Bool
@@ -251,33 +262,83 @@ translateVariable name value mData mCode treg freg = do
     
     -- END OF TRANSLATE_VARIABLE
 
--- function that translates a two-operand arithmetic expression into MIPS (SHELL)
-translateExpression :: String -> String -> PyArith -> PyVar -> FilePath -> FilePath -> Int -> Int -> IO()
+-- function that translates a two-operand arithmetic expression into MIPS
+translateExpression :: PyVar -> PyVar -> PyArith -> PyVar -> FilePath -> FilePath -> Int -> Int -> IO ()
 translateExpression dest lhs op rhs mData mCode treg freg = do
-    case op of
-        -- check add operation
-        PyAdd -> do
-            appendFile mCode ("\taddi $t" ++ show treg ++ ", $0, " ++ lhs ++ "\n")
-            let treg' = treg + 1
-            appendFile mCode ("\taddi $t" ++ show treg' ++ ", $t" ++ show treg ++ ", " ++ renderOperand rhs ++ "\n")
-            putStrLn $ "Add operation detected"
-        -- check subtraction operation
-        PySub -> do
-            putStrLn $ "Subtract operation detected"
-        -- check multiply operation
-        PyMul -> do
-            putStrLn $ "Multiply operation detected"
-        -- check divide operation
-        PyDiv -> do
-            putStrLn $ "Divide operation detected"
-        -- check floor divide operation
-        PyFloorDiv -> do
-            putStrLn $ "Floor divide operation detected"
-        -- check modulo operation
-        PyMod -> do
-            putStrLn $ "Modulo operation detected"
-        _     -> putStrLn "Unidentified operation"
-    putStrLn "translateExpression successful"
+  putStrLn $ "DEBUG lhs=" ++ show lhs ++ " | rhs=" ++ show rhs
+  case op of
+    PyAdd -> do
+      case (lhs, rhs) of
+        -- 1. Pure literals
+        (PyInt l, PyInt r) -> do
+          appendFile mCode ("\taddi $t" ++ show treg ++ ", $0, " ++ show l ++ "\n")
+          let treg' = treg + 1
+          appendFile mCode ("\taddi $t" ++ show treg' ++ ", $t" ++ show treg ++ ", " ++ show r ++ "\n")
+          putStrLn "Add operation: PyInt + PyInt"
+        
+        (PyFloat l, PyFloat r) -> do
+          appendFile mCode ("\tli.s $f" ++ show freg ++ ", " ++ show l ++ "\n")
+          let freg' = freg + 1
+          appendFile mCode ("\tadd.s $f" ++ show freg ++ ", $f" ++ show freg ++ ", $f" ++ show freg' ++ "\n")
+          putStrLn "Add operation: PyFloat + PyFloat"
+        
+        (PyInt l, PyFloat r) -> do
+          appendFile mCode ("\tli.s $f" ++ show freg ++ ", " ++ show l ++ "\n")
+          let freg' = freg + 1
+          appendFile mCode ("\tadd.s $f" ++ show freg ++ ", $f" ++ show freg ++ ", $f" ++ show freg' ++ "\n")
+          putStrLn "Add operation: PyInt + PyFloat"
+        
+        (PyFloat l, PyInt r) -> do
+          appendFile mCode ("\tli.s $f" ++ show freg ++ ", " ++ show l ++ "\n")
+          let freg' = freg + 1
+          appendFile mCode ("\tadd.s $f" ++ show freg ++ ", $f" ++ show freg ++ ", $f" ++ show freg' ++ "\\n")
+          putStrLn "Add operation: PyFloat + PyInt"
+        
+        -- 5. Common: var + literal
+        (_, PyInt r) -> do
+          appendFile mCode ("\tlw $t" ++ show treg ++ ", " ++ prettyPyVar lhs ++ "\n")
+          let treg' = treg + 1
+          appendFile mCode ("\taddi $t" ++ show treg' ++ ", $t" ++ show treg ++ ", " ++ show r ++ "\n")
+          putStrLn "Add operation: _ + PyInt"
+        
+        (_, PyFloat r) -> do
+          appendFile mCode ("\tlw $t" ++ show treg ++ ", " ++ prettyPyVar lhs ++ "\n")
+          let treg' = treg + 1
+          appendFile mCode ("\tmtc1 $t" ++ show treg ++ ", $f" ++ show freg ++ "\n")
+          appendFile mCode ("\tcvt.s.w $f" ++ show freg ++ ", $f" ++ show freg ++ "\n")
+          let freg' = freg + 1
+          appendFile mCode ("\tli.s $f" ++ show freg' ++ ", " ++ show r ++ "\n")
+          appendFile mCode ("\tad.s $f" ++ show freg ++ ", $f" ++ show freg ++ ", $f" ++ show freg' ++ "\n")
+          putStrLn "Add operation: _ + PyFloat"
+        
+        -- 8. Literal + var  
+        (PyInt l, _) -> do
+          appendFile mCode ("\taddi $t" ++ show treg ++ ", $0, " ++ show l ++ "\n")
+          let treg' = treg + 1
+          appendFile mCode ("\tlw $t" ++ show treg' ++ ", " ++ prettyPyVar rhs ++ "\n")
+          let treg'' = treg' + 1
+          appendFile mCode ("\tadd $t" ++ show treg'' ++ ", $t" ++ show treg ++ ", $t" ++ show treg' ++ "\n")
+          putStrLn "Add operation: PyInt + _"
+        
+        (PyFloat l, _) -> do
+          appendFile mCode ("\tli.s $f" ++ show freg ++ ", " ++ show l ++ "\n")
+          let freg' = freg + 1
+          appendFile mCode ("\tlw $t" ++ show treg ++ ", " ++ prettyPyVar rhs ++ "\n")
+          appendFile mCode ("\tmtc1 $t" ++ show treg ++ ", $f" ++ show freg' ++ "\n")
+          appendFile mCode ("\tcvt.s.w $f" ++ show freg' ++ ", $f" ++ show freg' ++ "\n")
+          appendFile mCode ("\tadd.s $f" ++ show freg ++ ", $f" ++ show freg ++ ", $f" ++ show freg' ++ "\n")
+          putStrLn "Add operation: PyFloat + _"
+        
+        -- 9. Default: var + var
+        (_, _) -> do
+          appendFile mCode ("\tlw $t" ++ show treg ++ ", " ++ prettyPyVar lhs ++ "\n")
+          let treg' = treg + 1
+          appendFile mCode ("\tlw $t" ++ show treg' ++ ", " ++ prettyPyVar rhs ++ "\n")
+          let treg'' = treg' + 1
+          appendFile mCode ("\tadd $t" ++ show treg'' ++ ", $t" ++ show treg ++ ", $t" ++ show treg' ++ "\n")
+          putStrLn "Add operation: _ + _"
+      
+      putStrLn "Add operation detected"
 
 -- MAIN FUNCTION
 main :: IO()
@@ -303,7 +364,7 @@ main = do
     -- open Python file handle for line-by-line reading
     withFile python ReadMode $ \h -> do
         loop h mipsData mipsCode strCount tregCount fregCount  -- start the while loop
-    putStrLn "\nWriting to data.txt and code.txt successful"
+    putStrLn "Writing to data.txt and code.txt successful"
     
     -- write end program logic into code.txt
     appendFile mipsCode "\n\tjr $ra"
@@ -384,7 +445,7 @@ loop h mipsData mipsCode strCount tregCount fregCount = do
                     Just (destVar, lhs, rhsVar, op, rhsVal) -> do
                         -- Use varName and varValue
                         putStrLn $ "Arithmetic expression: " ++ destVar ++ " = " ++ lhs ++ " " ++ show op ++ " " ++ renderOperand rhsVal
-                        translateExpression destVar lhs op rhsVal mipsData mipsCode tregCount' fregCount'
+                        translateExpression (PyStr destVar) (PyStr lhs) op rhsVal mipsData mipsCode tregCount' fregCount'
                     Nothing -> return()
             6 -> do
                 -- translate function header
@@ -400,6 +461,9 @@ loop h mipsData mipsCode strCount tregCount fregCount = do
             _ -> do
                 -- display error message (statement should not be reachable due to prior checking)
                 putStrLn $ "Computation error"
+        
+        -- new line for formatting
+        putStr $ "\n"
         
         -- move to the next line using recursion
         loop h mipsData mipsCode strCount' tregCount' fregCount'
