@@ -14,7 +14,7 @@ import Data.Char (isSpace, toLower)         -- isSpace needed to trim leading an
 import Data.Char (isPunctuation, isSymbol, isDigit)  -- needed to check for special characters
 import Data.Typeable                        -- needed to determine the type of a variable (using PyVar)
 import Debug.Trace (trace)                  -- used for debugging
-import qualified Data.Text as T            -- (breakOn, append, drop, length)
+import qualified Data.Text as T             -- (breakOn, append, drop, length)
 import Control.Monad(unless)                -- needed for function loop
 import Text.Read (readMaybe)                -- needed to parse a string into a data type
 import Control.Exception (catch, IOException, throwIO)  -- needed to check empty file
@@ -399,6 +399,7 @@ loop h mipsData mipsCode strCount tregCount fregCount = do
         let isPrint = "print(" `isPrefixOf` trimmedLine && not (isSpecial trimmedLine 6)
         let isArith = any (`isInfixOf` trimmedLine) [" + ", " - ", " * ", " / ", "//", "%"]
         let isVar = "=" `isInfixOf` trimmedLine && not isPrint && not isArith -- CHECK IF INFIX CHECK IS REDUNDANT
+        let isCond = "if " `isPrefixOf` trimmedLine || "elif " `isPrefixOf` trimmedLine || trimmedLine == "else:"
         let isFunc = "def " `isPrefixOf` trimmedLine
         let isFuncReturn = "return " `isPrefixOf` trimmedLine
         
@@ -416,7 +417,7 @@ loop h mipsData mipsCode strCount tregCount fregCount = do
         let result = if isPrint then 0 
                      else if isVar then 1
                      else if isArith then 2
-                     -- else if isCond then 3
+                     else if isCond then 3
                      -- else if isCase then 4
                      -- else if isLoop then 5
                      else if isFunc then 6
@@ -447,6 +448,9 @@ loop h mipsData mipsCode strCount tregCount fregCount = do
                         putStrLn $ "Arithmetic expression: " ++ destVar ++ " = " ++ lhs ++ " " ++ show op ++ " " ++ renderOperand rhsVal
                         translateExpression (PyStr destVar) (PyStr lhs) op rhsVal mipsData mipsCode tregCount' fregCount'
                     Nothing -> return()
+            3 -> do
+                -- translate function header
+                putStrLn $ "Conditional statement (code abstracted)"
             6 -> do
                 -- translate function header
                 putStrLn $ "Function header (code abstracted)"
@@ -462,7 +466,9 @@ loop h mipsData mipsCode strCount tregCount fregCount = do
                 -- display error message (statement should not be reachable due to prior checking)
                 putStrLn $ "Computation error"
         
-        -- new line for formatting
+        -- new line for formatting (EMPTY LINE CHECK MAY BE REDUNDANT)
+        if (not(isEmpty trimmedLine)) then appendFile mipsCode ("\n")
+        else do putStr ""
         putStr $ "\n"
         
         -- move to the next line using recursion
