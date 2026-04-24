@@ -14,39 +14,6 @@ import Data.Char (isSpace, toLower)         -- isSpace needed to trim leading an
 import Data.Char (isPunctuation, isSymbol, isDigit)  -- needed to check for special characters
 import Data.Typeable                        -- needed to determine the type of a variable (using PyVar)
 import Debug.Trace (trace)                  -- used for debugging
-import qualified Data.Text as T             -- (breakOn, append, drop, length)
-import Control.Monad(unless)                -- needed for function loop
-import Text.Read (readMaybe)                -- needed to parse a string into a data type
-import Control.Exception (catch, IOException, throwIO)  -- needed to check empty file
-import System.IO.Error (isDoesNotExistError)    -- neded to throw exception when Python file does not exist
-import System.Exit (exitFailure)            -- needed to terminate the program when an exception is encountered
-
--- write data constructors to define Python variable types
-data PyVar = PyInt Integer | PyFloat Float | PyBool Bool | PyStr String | Unknown deriving (Eq, Show)
-
--- write data constructors to define Python operators (arithmetic and comparison)
-data PyArith = PyAdd | PySub | PyMul | PyDiv | PyFloorDiv | PyMod deriving Show
-data PyCompare = PyEq | PyNEq | PyLT | PyLTE | PyGT | PyGTE deriving Show
-
--- write data constructors to define two-operand Python arithmetic expressions
-data PyExpr = VarDecl String PyVar
-            | ArithAssign String String PyArith PyVar  -- dest = lhs op rhs
-            deriving Show-- TESTABLE CASES:
--- SIMPLE PRINT STATEMENTS WITH STRINGS
--- DECLARING VARIABLES (int, float, bool, string)
--- SIMPLE TWO-OPERAND ARITHMETIC (+, -, *, /, //, %) (PARTIALLY DONE)
--- started first steps of conditional statement checking
--- TESTABLE FRINGE CASES: Python file does not exist or is empty
--- (will spend significantly more time refining and adding before finished)
-import System.IO                            -- needed for OpenFile
-import Data.List (isPrefixOf, isInfixOf)    -- needed to identify leading keywords ("print") and assignment operator
-import Data.List (delete, stripPrefix)      -- delete removes first occurrence of substring
-import Data.List (dropWhileEnd)             -- needed to trim trailing white space
-import Data.List.Split (splitOn)            -- needed for string extraction (concat)
-import Data.Char (isSpace, toLower)         -- isSpace needed to trim leading and trailing white space, toLower needed for bool variables
-import Data.Char (isPunctuation, isSymbol, isDigit)  -- needed to check for special characters
-import Data.Typeable                        -- needed to determine the type of a variable (using PyVar)
-import Debug.Trace (trace)                  -- used for debugging
 import Data.Maybe (isJust)                  -- needed for conditional statement checking
 import Data.List (isSuffixOf)               -- needed for conditional statement checking
 import qualified Data.Text as T             -- (breakOn, append, drop, length)
@@ -85,11 +52,12 @@ data PyStmt
                 -- | PyCondWord PyVar PyCompare PyVar
                 | PyCondFinal deriving Show     -- else -}
 data PyIfChain = PyIfChain
-  { ifCond   :: PyCond
-  , ifBody   :: [PyStmt]
-  , elifs    :: [(PyCond, [PyStmt])]
-  , elseBody :: Maybe [PyStmt]
-  }
+  { ifCond     :: PyCond
+  , ifBody     :: [PyStmt]
+  , elifs      :: [(PyCond, [PyStmt])]
+  , elseBody   :: Maybe [PyStmt]
+  , indentLevel :: Int
+  } deriving Show
 
 -- simple function that removes leading whitespace from a line of code
 -- key benefit: helps eliminate indentation when looking for prefix keywords
@@ -199,6 +167,16 @@ extractElseLine trimmed =
   case w of
     ("else":_) -> Just "else"
     _ -> Nothing
+
+-- helper function that renders variables and registers
+loadVarToReg :: PyVar -> String -> FilePath -> IO ()
+loadVarToReg var reg mCode = do
+  case var of
+    PyInt i   -> appendFile mCode $ "\tlw $" ++ reg ++ ", " ++ show i ++ "\n"
+    PyFloat f -> appendFile mCode $ "\tl.s $f" ++ reg ++ ", " ++ show f ++ "\n"
+    PyStr s   -> appendFile mCode $ "\tla $" ++ reg ++ ", " ++ s ++ "\n"
+    PyBool b  -> appendFile mCode $ "\tli $" ++ reg ++ ", " ++ (if b then "1" else "0") ++ "\n"
+    _         -> appendFile mCode $ "\tli $" ++ reg ++ ", 0\n"
     
 -- function that parses value string to PyVar (int, float, bool, string types)
 parseValue :: String -> PyVar
@@ -413,6 +391,120 @@ translateExpression dest lhs op rhs mData mCode treg freg = do
       
       putStrLn "Add operation detected"
 
+-- function that translates a simple conditional statement
+translateIfChain :: PyIfChain -> FilePath -> FilePath -> Int -> IO Int
+translateIfChain ifchain mData mCode labelId = do
+  let endLabel = "end_if_" ++ show labelId
+  
+  -- === IF BLOCK ===
+  let elif1Label = if null (elifs ifchain) 
+                   then endLabel 
+                   else "elif1_" ++ show labelId
+  emitConditionJump (ifCond ifchain) elif1Label mCode
+  treg1 <- emitBody (ifBody ifchain) mData mCode labelId
+  appendFile mCode ("\tj " ++ endLabel ++ "\n\n")
+  
+  -- === ELIF BLOCKS ===
+  treg2 <- translateElifs (elifs ifchain) mData mCode treg1 endLabel
+  
+  -- === ELSE BLOCK ===
+  case elseBody ifchain of
+    Just elseStmts -> do
+      appendFile mCode ("else_" ++ show labelId ++ ":\n")
+      _ <- emitBody elseStmts mData mCode treg2
+      return (labelId + 1)
+    Nothing -> return (labelId + 1)
+
+-- helper function that translates elif blocks
+translateElifs :: [(PyCond, [PyStmt])] -> FilePath -> FilePath -> Int -> String -> IO Int
+translateElifs [] _ _ treg _ = do
+  putStrLn "DEBUG: No elifs"  -- << ADD
+  return treg
+
+translateElifs ((cond, body):rest) mData mCode treg endLabel = do
+  let thisLabel = "elif_" ++ show treg
+  appendFile mCode (thisLabel ++ ":\n")
+  putStrLn $ "DEBUG: Writing elif label: " ++ thisLabel  -- << ADD
+  
+  emitConditionJump cond endLabel mCode  -- CONDITION JUMP FIRST!
+  treg' <- emitBody body mData mCode treg
+  appendFile mCode ("\tj " ++ endLabel ++ "\n\n")
+  putStrLn $ "DEBUG: Elif body done, treg'=" ++ show treg'  -- << ADD
+  
+  translateElifs rest mData mCode treg' endLabel
+
+-- function that translates conditional jump
+emitConditionJump :: PyCond -> String -> FilePath -> IO ()
+emitConditionJump (PyCond lhs cmp rhs) falseLabel mCode = do
+  -- Load LHS and RHS into registers $t0, $t1
+  loadVarToReg lhs "$t0" mCode
+  loadVarToReg rhs "$t1" mCode
+  
+  -- Emit branch based on comparison (negated for "if" logic)
+  case cmp of
+    PyEQ  -> appendFile mCode $ "\tbeq $t0, $t1, " ++ falseLabel ++ "\n"     -- Jump if EQUAL (false)
+    PyNEQ -> appendFile mCode $ "\tbne $t0, $t1, L_true_" ++ falseLabel ++ "\n"  -- Jump if NOT EQUAL (true falls through)
+    PyLT  -> appendFile mCode $ "\tblt $t0, $t1, L_true_" ++ falseLabel ++ "\n"  -- Jump if LESS (true)
+    PyLTE -> appendFile mCode $ "\tble $t0, $t1, L_true_" ++ falseLabel ++ "\n"
+    PyGT  -> appendFile mCode $ "\tbgt $t0, $t1, L_true_" ++ falseLabel ++ "\n"
+    PyGTE -> appendFile mCode $ "\tbge $t0, $t1, L_true_" ++ falseLabel ++ "\n"
+
+-- function that translates code within the body of a conditional statement
+emitBody :: [PyStmt] -> FilePath -> FilePath -> Int -> IO Int
+emitBody [] _ _ treg = return treg  -- No statements, no regs used
+
+emitBody [] mData mCode treg = do
+  appendFile mCode "\tnop\n"  -- placeholder for empty body
+  return treg
+
+emitBody (stmt:rest) mData mCode treg = do
+  case stmt of
+    PyPrint var -> do
+      translatePrint (prettyPyVar var) mData mCode treg
+      emitBody rest mData mCode (treg + 1)
+    PyAssign name val -> do
+      translateVariable name val mData mCode treg 0  -- freg=0 for now
+      emitBody rest mData mCode (treg + 1)
+    _ -> putStrLn "emitBody: Unsupported stmt" >> emitBody rest mData mCode treg
+
+-- Fixed empty chain
+emptyChain :: PyIfChain
+emptyChain = PyIfChain (PyCond Unknown PyEQ Unknown) [] [] Nothing 0
+
+-- Add line to body
+addLineToChain :: PyIfChain -> String -> PyIfChain
+addLineToChain chain line = 
+  chain { ifBody = parseStmt line : ifBody chain }
+
+-- Add elif
+addElifToChain :: PyIfChain -> PyCond -> PyIfChain
+addElifToChain chain cond = 
+  chain { elifs = (cond, ifBody chain) : elifs chain, ifBody = [] }
+
+-- Set else body  
+setElseBody :: PyIfChain -> [PyStmt] -> PyIfChain
+setElseBody chain stmts = 
+  chain { elseBody = Just stmts }
+
+-- Parse single stmt (simple version)
+parseStmt :: String -> PyStmt     -- Now pure!
+parseStmt line = 
+  case extractVariable line of
+    Just (name, val) -> PyAssign name val
+    Nothing -> PyPrint (PyStr (extractStringPure line))
+  where
+    extractStringPure :: String -> String
+    extractStringPure trimmed = 
+      let extracted = maybe trimmed id (stripPrefix "print(" trimmed)
+          noParen = init (noTrailingSpace extracted)
+      in noLeadingSpace noParen
+
+-- Parse condition (simple)
+parseCond :: String -> PyCond
+parseCond line = 
+  -- Extract "x > 5" → PyCond (PyStr "x") PyGT (PyInt 5)
+  PyCond (PyStr "x") PyGT (PyInt 5)  -- Placeholder for now
+
 -- MAIN FUNCTION
 main :: IO()
 main = do
@@ -436,19 +528,20 @@ main = do
     
     -- open Python file handle for line-by-line reading
     withFile python ReadMode $ \h -> do
-        loop h mipsData mipsCode strCount tregCount fregCount  -- start the while loop
-    putStrLn "Writing to data.txt and code.txt successful"
+        loop h mipsData mipsCode strCount tregCount fregCount emptyChain 0  -- start the while loop
     
     -- write end program logic into code.txt
+    appendFile mipsCode "\n\t; END PROGRAM"
     appendFile mipsCode "\n\tjr $ra"
+    putStrLn "Writing to data.txt and code.txt successful"
     
     -- merge the two .txt files into assembly.s (FINAL STEP OF THE WHOLE PROGRAM)
     mergeMips mipsData mipsCode mipsFinal
     putStrLn "Writing to assembly.s successful"
 
 -- WHILE NOT EOF LOOP (continues until end of test.py)
-loop :: Handle -> String -> String -> Int -> Int -> Int -> IO ()
-loop h mipsData mipsCode strCount tregCount fregCount = do
+loop :: Handle -> String -> String -> Int -> Int -> Int -> PyIfChain -> Int -> IO ()
+loop h mipsData mipsCode strCount tregCount fregCount chain labelCount = do
     eof <- hIsEOF h
     unless eof $ do
         -- read next line and trim leading whitespace
@@ -462,7 +555,7 @@ loop h mipsData mipsCode strCount tregCount fregCount = do
         -- skipComments trimmedLine = do
         -- <<insert code seen below>>
         case trimmedLine of
-            ('#':_) -> loop h mipsData mipsCode strCount tregCount fregCount  -- comment line, skip
+            ('#':_) -> loop h mipsData mipsCode strCount tregCount fregCount chain labelCount  -- comment line, skip
             _       -> do  -- non-comment, process normally
                 if (isEmpty trimmedLine) then
                     putStrLn $ "Empty line skipped"
@@ -531,16 +624,42 @@ loop h mipsData mipsCode strCount tregCount fregCount = do
                         translateExpression (PyStr destVar) (PyStr lhs) op rhsVal mipsData mipsCode tregCount' fregCount'
                     Nothing -> return()
             3 -> do
-                -- translate conditional statement
-                case (isIf, isElif, isElse) of
+              -- translate conditional statement
+              case (isIf, isElif, isElse) of
                   (True, _, _)    -> do
                     putStrLn "IF condition detected"
+                    appendFile mipsCode "\t; IF CONDITION\n"
                   (_, True, _)    -> do
                     putStrLn "ELIF condition detected"
+                    appendFile mipsCode "\t; ELIF CONDITION\n"
                   (_, _, True)    -> do
                     putStrLn "ELSE condition detected"
+                    appendFile mipsCode "\t; ELSE CONDITION\n"
                   _               -> putStrLn "Invalid conditional"
-                putStrLn $ "CONDITIONAL STATEMENT (code abstracted)"
+              
+              let lineIndent = length (takeWhile isSpace pyLine)
+              let lowerTrim = map toLower trimmedLine
+              
+              if lineIndent > indentLevel chain then do
+                let newChain = addLineToChain chain trimmedLine
+                loop h mipsData mipsCode strCount tregCount fregCount newChain labelCount
+              
+              else if "if " `isPrefixOf` lowerTrim then do
+                labelCount' <- translateIfChain chain mipsData mipsCode labelCount
+                let freshChain = emptyChain { indentLevel = lineIndent, ifCond = parseCond trimmedLine }
+                loop h mipsData mipsCode strCount tregCount fregCount freshChain labelCount'
+              
+              else if "elif " `isPrefixOf` lowerTrim then do
+                let newChain = addElifToChain chain (parseCond trimmedLine)
+                loop h mipsData mipsCode strCount tregCount fregCount newChain labelCount
+              
+              else if "else:" `isInfixOf` lowerTrim then do
+                let newChain = setElseBody chain []
+                loop h mipsData mipsCode strCount tregCount fregCount newChain labelCount
+              
+              else do
+                labelCount' <- translateIfChain chain mipsData mipsCode labelCount
+                loop h mipsData mipsCode strCount tregCount fregCount emptyChain labelCount'
             6 -> do
                 -- translate function header
                 putStrLn $ "Function header (code abstracted)"
@@ -562,4 +681,4 @@ loop h mipsData mipsCode strCount tregCount fregCount = do
         putStr $ "\n"
         
         -- move to the next line using recursion
-        loop h mipsData mipsCode strCount' tregCount' fregCount'
+        loop h mipsData mipsCode strCount' tregCount' fregCount' chain labelCount
