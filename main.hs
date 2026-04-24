@@ -14,13 +14,14 @@ import Data.Char (isSpace, toLower)         -- isSpace needed to trim leading an
 import Data.Char (isPunctuation, isSymbol, isDigit)  -- needed to check for special characters
 import Data.Typeable                        -- needed to determine the type of a variable (using PyVar)
 import Debug.Trace (trace)                  -- used for debugging
-import Data.Maybe (isJust)                  -- needed for conditional statement checking
+import Data.Maybe (isJust, fromJust)        -- needed for conditional statement checking
 import Data.List (isSuffixOf)               -- needed for conditional statement checking
+import Data.Text (breakOn)                  -- needed for conditional statement parsing
 import qualified Data.Text as T             -- (breakOn, append, drop, length)
 import Control.Monad(unless)                -- needed for function loop
 import Text.Read (readMaybe)                -- needed to parse a string into a data type
 import Control.Exception (catch, IOException, throwIO)  -- needed to check empty file
-import System.IO.Error (isDoesNotExistError)    -- neded to throw exception when Python file does not exist
+import System.IO.Error (isDoesNotExistError)    -- needed to throw exception when Python file does not exist
 import System.Exit (exitFailure)            -- needed to terminate the program when an exception is encountered
 
 -- write data constructors to define Python variable types
@@ -51,11 +52,13 @@ data PyStmt
 {- data PyCondExpr = PyCondWord PyVar PyCompare PyVar      -- i.e. if x == 5, elif y >= x
                 -- | PyCondWord PyVar PyCompare PyVar
                 | PyCondFinal deriving Show     -- else -}
+data BlockType = NoBlock | IfCollecting | ElifCollecting | ElseCollecting deriving (Eq, Show)
 data PyIfChain = PyIfChain
-  { ifCond     :: PyCond
-  , ifBody     :: [PyStmt]
-  , elifs      :: [(PyCond, [PyStmt])]
-  , elseBody   :: Maybe [PyStmt]
+  { ifCond      :: PyCond
+  , ifBody      :: [PyStmt]
+  , elifs       :: [(PyCond, [PyStmt])]
+  , elseBody    :: Maybe [PyStmt]
+  , blockType   :: BlockType
   , indentLevel :: Int
   } deriving Show
 
@@ -172,11 +175,11 @@ extractElseLine trimmed =
 loadVarToReg :: PyVar -> String -> FilePath -> IO ()
 loadVarToReg var reg mCode = do
   case var of
-    PyInt i   -> appendFile mCode $ "\tlw $" ++ reg ++ ", " ++ show i ++ "\n"
-    PyFloat f -> appendFile mCode $ "\tl.s $f" ++ reg ++ ", " ++ show f ++ "\n"
+    PyInt i   -> appendFile mCode $ "\tli $" ++ reg ++ ", " ++ show i ++ "\n"
+    PyFloat f -> appendFile mCode $ "\tli.s $" ++ reg ++ ", " ++ show f ++ "\n"
     PyStr s   -> appendFile mCode $ "\tla $" ++ reg ++ ", " ++ s ++ "\n"
     PyBool b  -> appendFile mCode $ "\tli $" ++ reg ++ ", " ++ (if b then "1" else "0") ++ "\n"
-    _         -> appendFile mCode $ "\tli $" ++ reg ++ ", 0\n"
+    Unknown   -> appendFile mCode $ "\tli $" ++ reg ++ ", 0\n"
     
 -- function that parses value string to PyVar (int, float, bool, string types)
 parseValue :: String -> PyVar
@@ -275,6 +278,7 @@ translatePrint str mData mCode strCount = do
     appendFile mData ("str" ++ show strCount ++ ": .asciiz \"" ++ str ++ "\"\n")
     
     -- write .text translation
+    appendFile mCode ("\t; PRINT STATEMENT\n")
     appendFile mCode ("\tla $a0, str" ++ show strCount ++ "\n" ++ "\tli $v0, 4\n")
     appendFile mCode ("\tsyscall\n\n")
 
@@ -395,59 +399,54 @@ translateExpression dest lhs op rhs mData mCode treg freg = do
 translateIfChain :: PyIfChain -> FilePath -> FilePath -> Int -> IO Int
 translateIfChain ifchain mData mCode labelId = do
   let endLabel = "end_if_" ++ show labelId
-  
-  -- === IF BLOCK ===
-  let elif1Label = if null (elifs ifchain) 
-                   then endLabel 
-                   else "elif1_" ++ show labelId
-  emitConditionJump (ifCond ifchain) elif1Label mCode
-  treg1 <- emitBody (ifBody ifchain) mData mCode labelId
+  let firstNextLabel = if null (elifs ifchain)
+                       then endLabel
+                       else "elif_0"
+
+  appendFile mCode ("\t; IF CONDITION\n")
+  emitConditionJump (ifCond ifchain) firstNextLabel mCode
+  _ <- emitBody (ifBody ifchain) mData mCode labelId
   appendFile mCode ("\tj " ++ endLabel ++ "\n\n")
-  
-  -- === ELIF BLOCKS ===
-  treg2 <- translateElifs (elifs ifchain) mData mCode treg1 endLabel
-  
-  -- === ELSE BLOCK ===
+
+  _ <- translateElifs (elifs ifchain) mData mCode 0 endLabel
+
   case elseBody ifchain of
     Just elseStmts -> do
+      appendFile mCode ("\t; ELSE CONDITION\n")
       appendFile mCode ("else_" ++ show labelId ++ ":\n")
-      _ <- emitBody elseStmts mData mCode treg2
+      _ <- emitBody elseStmts mData mCode labelId
+      appendFile mCode (endLabel ++ ":\n")
       return (labelId + 1)
-    Nothing -> return (labelId + 1)
+
+    Nothing -> do
+      appendFile mCode (endLabel ++ ":\n")
+      return (labelId + 1)
 
 -- helper function that translates elif blocks
 translateElifs :: [(PyCond, [PyStmt])] -> FilePath -> FilePath -> Int -> String -> IO Int
-translateElifs [] _ _ treg _ = do
-  putStrLn "DEBUG: No elifs"  -- << ADD
-  return treg
-
-translateElifs ((cond, body):rest) mData mCode treg endLabel = do
-  let thisLabel = "elif_" ++ show treg
+translateElifs [] _ _ treg _ = return treg
+translateElifs ((cond, body):rest) mData mCode labelId endLabel = do
+  let thisLabel = "elif_" ++ show labelId
+  let nextLabel = if null rest then endLabel else "elif_" ++ show (labelId + 1)
   appendFile mCode (thisLabel ++ ":\n")
-  putStrLn $ "DEBUG: Writing elif label: " ++ thisLabel  -- << ADD
-  
-  emitConditionJump cond endLabel mCode  -- CONDITION JUMP FIRST!
-  treg' <- emitBody body mData mCode treg
+  emitConditionJump cond nextLabel mCode
+  _ <- emitBody body mData mCode labelId
   appendFile mCode ("\tj " ++ endLabel ++ "\n\n")
-  putStrLn $ "DEBUG: Elif body done, treg'=" ++ show treg'  -- << ADD
-  
-  translateElifs rest mData mCode treg' endLabel
+  translateElifs rest mData mCode (labelId + 1) endLabel
 
--- function that translates conditional jump
+-- function that translated a conditional statement with labels
 emitConditionJump :: PyCond -> String -> FilePath -> IO ()
-emitConditionJump (PyCond lhs cmp rhs) falseLabel mCode = do
-  -- Load LHS and RHS into registers $t0, $t1
-  loadVarToReg lhs "$t0" mCode
-  loadVarToReg rhs "$t1" mCode
+emitConditionJump (PyCond lhs cmp rhs) nextLabel mCode = do
+  loadVarToReg lhs "t0" mCode
+  loadVarToReg rhs "t1" mCode
   
-  -- Emit branch based on comparison (negated for "if" logic)
   case cmp of
-    PyEQ  -> appendFile mCode $ "\tbeq $t0, $t1, " ++ falseLabel ++ "\n"     -- Jump if EQUAL (false)
-    PyNEQ -> appendFile mCode $ "\tbne $t0, $t1, L_true_" ++ falseLabel ++ "\n"  -- Jump if NOT EQUAL (true falls through)
-    PyLT  -> appendFile mCode $ "\tblt $t0, $t1, L_true_" ++ falseLabel ++ "\n"  -- Jump if LESS (true)
-    PyLTE -> appendFile mCode $ "\tble $t0, $t1, L_true_" ++ falseLabel ++ "\n"
-    PyGT  -> appendFile mCode $ "\tbgt $t0, $t1, L_true_" ++ falseLabel ++ "\n"
-    PyGTE -> appendFile mCode $ "\tbge $t0, $t1, L_true_" ++ falseLabel ++ "\n"
+    PyEQ  -> appendFile mCode $ "\tbne $t0, $t1, " ++ nextLabel ++ "\n"
+    PyNEQ -> appendFile mCode $ "\tbeq $t0, $t1, " ++ nextLabel ++ "\n"
+    PyLT  -> appendFile mCode $ "\tbge $t0, $t1, " ++ nextLabel ++ "\n"
+    PyLTE -> appendFile mCode $ "\tbgt $t0, $t1, " ++ nextLabel ++ "\n"
+    PyGT  -> appendFile mCode $ "\tble $t0, $t1, " ++ nextLabel ++ "\n"
+    PyGTE -> appendFile mCode $ "\tblt $t0, $t1, " ++ nextLabel ++ "\n"
 
 -- function that translates code within the body of a conditional statement
 emitBody :: [PyStmt] -> FilePath -> FilePath -> Int -> IO Int
@@ -467,9 +466,27 @@ emitBody (stmt:rest) mData mCode treg = do
       emitBody rest mData mCode (treg + 1)
     _ -> putStrLn "emitBody: Unsupported stmt" >> emitBody rest mData mCode treg
 
+-- Add line to body
+addStmtToChain :: PyIfChain -> PyStmt -> PyIfChain
+addStmtToChain chain stmt =
+  case blockType chain of
+    IfCollecting ->
+      chain { ifBody = ifBody chain ++ [stmt] }
+
+    ElifCollecting ->
+      chain { ifBody = ifBody chain ++ [stmt] }
+
+    ElseCollecting ->
+      case elseBody chain of
+        Just body -> chain { elseBody = Just (body ++ [stmt]) }
+        Nothing   -> chain { elseBody = Just [stmt] }
+
+    NoBlock ->
+      chain
+
 -- Fixed empty chain
 emptyChain :: PyIfChain
-emptyChain = PyIfChain (PyCond Unknown PyEQ Unknown) [] [] Nothing 0
+emptyChain = PyIfChain (PyCond Unknown PyEQ Unknown) [] [] Nothing NoBlock 0
 
 -- Add line to body
 addLineToChain :: PyIfChain -> String -> PyIfChain
@@ -487,23 +504,82 @@ setElseBody chain stmts =
   chain { elseBody = Just stmts }
 
 -- Parse single stmt (simple version)
-parseStmt :: String -> PyStmt     -- Now pure!
-parseStmt line = 
+parseStmt :: String -> PyStmt
+parseStmt line =
   case extractVariable line of
     Just (name, val) -> PyAssign name val
     Nothing -> PyPrint (PyStr (extractStringPure line))
   where
     extractStringPure :: String -> String
-    extractStringPure trimmed = 
+    extractStringPure trimmed =
       let extracted = maybe trimmed id (stripPrefix "print(" trimmed)
           noParen = init (noTrailingSpace extracted)
       in noLeadingSpace noParen
 
--- Parse condition (simple)
+parseStmtOrSkip :: String -> Bool -> Maybe PyStmt
+parseStmtOrSkip line inBlock
+  | inBlock =
+      Just (parseStmt line)
+  | otherwise =
+      Just (parseStmt line)
+
+-- function that flushes the current elif branch to prevent duplicates
+flushCurrentBranch :: PyIfChain -> PyIfChain
+flushCurrentBranch chain =
+  case blockType chain of
+    IfCollecting ->
+      chain { elifs = elifs chain ++ [(ifCond chain, ifBody chain)]
+            , ifBody = []
+            }
+
+    ElifCollecting ->
+      chain { elifs = elifs chain ++ [(ifCond chain, ifBody chain)]
+            , ifBody = []
+            }
+
+    ElseCollecting ->
+      chain
+
+    NoBlock ->
+      chain
+
+-- function that parse a condition within a simple conditional statement
 parseCond :: String -> PyCond
-parseCond line = 
-  -- Extract "x > 5" → PyCond (PyStr "x") PyGT (PyInt 5)
-  PyCond (PyStr "x") PyGT (PyInt 5)  -- Placeholder for now
+parseCond line =
+  case body of
+    "" -> PyCond Unknown PyEQ Unknown
+    _  ->
+      case firstOp ops body of
+        Just op ->
+          let (lhsStr, rhsStr) = splitOnce op body
+          in case parseCompare op of
+               Just cmp -> PyCond (parseValue (trim lhsStr)) cmp (parseValue (trim rhsStr))
+               Nothing  -> PyCond Unknown PyEQ Unknown
+        Nothing -> PyCond Unknown PyEQ Unknown
+  where
+    ops = ["==", "!=", "<=", ">=", "<", ">"]
+    trim = noLeadingSpace . noTrailingSpace
+
+    clean = trim line
+    body
+      | "if " `isPrefixOf` clean   = trim (drop 3 clean)
+      | "elif " `isPrefixOf` clean = trim (drop 5 clean)
+      | "else:" `isPrefixOf` clean = ""
+      | otherwise                  = clean
+
+firstOp :: [String] -> String -> Maybe String
+firstOp [] _ = Nothing
+firstOp (op:ops) s
+  | op `isInfixOf` s = Just op
+  | otherwise        = firstOp ops s
+  
+splitOnce :: String -> String -> (String, String)
+splitOnce op s = go "" s
+  where
+    go acc xs
+      | op `isPrefixOf` xs = (reverse acc, drop (length op) xs)
+      | null xs            = (reverse acc, "")
+      | otherwise          = go (head xs : acc) (tail xs)
 
 -- MAIN FUNCTION
 main :: IO()
@@ -540,6 +616,7 @@ main = do
     putStrLn "Writing to assembly.s successful"
 
 -- WHILE NOT EOF LOOP (continues until end of test.py)
+-- WHILE NOT EOF LOOP (continues until end of test.py)
 loop :: Handle -> String -> String -> Int -> Int -> Int -> PyIfChain -> Int -> IO ()
 loop h mipsData mipsCode strCount tregCount fregCount chain labelCount = do
     eof <- hIsEOF h
@@ -547,138 +624,185 @@ loop h mipsData mipsCode strCount tregCount fregCount chain labelCount = do
         -- read next line and trim leading whitespace
         pyLine <- hGetLine h
         let trimmedLine = noLeadingSpace pyLine
+        let cleanLine = noTrailingSpace trimmedLine
+        let lineIndent = length (takeWhile isSpace pyLine)
+        
+        putStrLn $ "LINE = " ++ show trimmedLine
+        putStrLn $ "INDENT = " ++ show lineIndent
+        putStrLn $ "CHAIN BLOCK = " ++ show (blockType chain)
+        putStrLn $ "CHAIN INDENT = " ++ show (indentLevel chain)
         
         -- IF CHARACTER AT trimmedLine INDEX 0 IS '#', THEN IGNORE COMPLETELY AND MOVE TO NEXT LINE
-        -- REFACTOR SO THAT STRING LITERALS CAN ALSO IGNORE COMMENTS IN TRANSLATE_PRINT
-        -- SAMPLE FUNCTION TEMPLATE:
-        -- skipComments :: String -> String or IO String
-        -- skipComments trimmedLine = do
-        -- <<insert code seen below>>
         case trimmedLine of
-            ('#':_) -> loop h mipsData mipsCode strCount tregCount fregCount chain labelCount  -- comment line, skip
-            _       -> do  -- non-comment, process normally
+            ('#':_) -> loop h mipsData mipsCode strCount tregCount fregCount chain labelCount
+            _       -> do
+                -- if line is empty, skip it
                 if (isEmpty trimmedLine) then
                     putStrLn $ "Empty line skipped"
-                else do putStr $ ""
+                else do
+                    putStr $ ""
             
-        -- trim whitespace and find whether "print" is a prefix of the full string
-        let isPrint = "print(" `isPrefixOf` trimmedLine && not (isSpecial trimmedLine 6)
-        let isArith = isVarInit trimmedLine && any (`isInfixOf` trimmedLine) [" + ", " - ", " * ", " / ", "//", "%"]
-        
-        -- check conditional statements
-        let lowerTrimmed = map toLower trimmedLine
-        let isIf = "if " `isPrefixOf` lowerTrimmed && ":" `isSuffixOf` trimmedLine
-        let isElif = "elif " `isPrefixOf` lowerTrimmed && ":" `isSuffixOf` trimmedLine  
-        let isElse = "else:" `isInfixOf` lowerTrimmed
-        
-        -- check function declarations and returns
-        let isFunc = "def " `isPrefixOf` trimmedLine
-        let isFuncReturn = "return " `isPrefixOf` trimmedLine
-        
-        -- check variable declarations
-        let isVar = "=" `isInfixOf` trimmedLine && not isPrint && not isArith -- CHECK IF INFIX CHECK IS REDUNDANT
-        
-        -- update count variables
-        -- strCount used for variable names in MIPS (i.e. str1, str2, str3, etc.)
-        -- *regCount variables used for register names in MIPS (i.e. $t0, $t1, $t2, $f0, $f1, $f2, etc.)
-        let strCount' = if isPrint then (strCount + 1)
-                        else strCount
-        let tregCount' = if isVar then ((tregCount + 1) `rem` 10)
-                        else tregCount
-        let fregCount' = if isVar then ((fregCount + 1) `rem` 32)
-                        else fregCount
-        
-        -- map a value to each statement type for cleaner evaluation
-        let result = if isPrint then 0 
-                     else if isArith then 2
-                     else if (isIf || isElif || isElse) then 3
-                     -- else if isCase then 4
-                     -- else if isLoop then 5
-                     else if isFunc then 6
-                     else if isFuncReturn then 7
-                     else if isVar then 1
-                     else -1
-        
-        -- translate line into MIPS based on the type of statement
-        case result of
-            0 -> do
-                -- translate print line
-                strLiteral <- extractString trimmedLine
-                translatePrint strLiteral mipsData mipsCode strCount'
-            1 -> do
-                -- translate simple variable declaration
-                maybeVar <- pure $ extractVariable trimmedLine
-                case maybeVar of
-                    Just (varName, varValue) -> do
-                        -- Use varName and varValue
-                        putStrLn $ "Var: " ++ varName ++ " = " ++ show varValue
-                        translateVariable varName varValue mipsData mipsCode tregCount' fregCount' -- varName and varValue now in scope for whole do block
-                    Nothing -> return()
-            2 -> do
-                -- translate two-operand arithmetic operations
-                maybeVar <- pure $ extractOperands trimmedLine
-                case maybeVar of
-                    Just (destVar, lhs, rhsVar, op, rhsVal) -> do
-                        -- Use varName and varValue
-                        putStrLn $ "Arithmetic expression: " ++ destVar ++ " = " ++ lhs ++ " " ++ show op ++ " " ++ renderOperand rhsVal
-                        translateExpression (PyStr destVar) (PyStr lhs) op rhsVal mipsData mipsCode tregCount' fregCount'
-                    Nothing -> return()
-            3 -> do
-              -- translate conditional statement
-              case (isIf, isElif, isElse) of
-                  (True, _, _)    -> do
-                    putStrLn "IF condition detected"
-                    appendFile mipsCode "\t; IF CONDITION\n"
-                  (_, True, _)    -> do
-                    putStrLn "ELIF condition detected"
-                    appendFile mipsCode "\t; ELIF CONDITION\n"
-                  (_, _, True)    -> do
-                    putStrLn "ELSE condition detected"
-                    appendFile mipsCode "\t; ELSE CONDITION\n"
-                  _               -> putStrLn "Invalid conditional"
-              
-              let lineIndent = length (takeWhile isSpace pyLine)
-              let lowerTrim = map toLower trimmedLine
-              
-              if lineIndent > indentLevel chain then do
-                let newChain = addLineToChain chain trimmedLine
-                loop h mipsData mipsCode strCount tregCount fregCount newChain labelCount
-              
-              else if "if " `isPrefixOf` lowerTrim then do
-                labelCount' <- translateIfChain chain mipsData mipsCode labelCount
-                let freshChain = emptyChain { indentLevel = lineIndent, ifCond = parseCond trimmedLine }
-                loop h mipsData mipsCode strCount tregCount fregCount freshChain labelCount'
-              
-              else if "elif " `isPrefixOf` lowerTrim then do
-                let newChain = addElifToChain chain (parseCond trimmedLine)
-                loop h mipsData mipsCode strCount tregCount fregCount newChain labelCount
-              
-              else if "else:" `isInfixOf` lowerTrim then do
-                let newChain = setElseBody chain []
-                loop h mipsData mipsCode strCount tregCount fregCount newChain labelCount
-              
-              else do
-                labelCount' <- translateIfChain chain mipsData mipsCode labelCount
-                loop h mipsData mipsCode strCount tregCount fregCount emptyChain labelCount'
-            6 -> do
-                -- translate function header
-                putStrLn $ "Function header (code abstracted)"
-            7 -> do
-                -- translate function return statement
-                putStrLn $ "Function return (code abstracted)"
-            -1 -> do
-                -- display "untestable operation" message if line is not empty
-                if (not(isEmpty trimmedLine)) then
-                    putStrLn $ "Encountered invalid/untested operation"
-                else return()
-            _ -> do
-                -- display error message (statement should not be reachable due to prior checking)
-                putStrLn $ "Computation error"
-        
-        -- new line for formatting (EMPTY LINE CHECK MAY BE REDUNDANT)
-        if (not(isEmpty trimmedLine)) then appendFile mipsCode ("\n")
-        else do putStr ""
-        putStr $ "\n"
-        
-        -- move to the next line using recursion
-        loop h mipsData mipsCode strCount' tregCount' fregCount' chain labelCount
+                -- trim whitespace and find whether "print" is a prefix of the full string
+                let isPrint = "print(" `isPrefixOf` trimmedLine && not (isSpecial trimmedLine 6)
+                let isArith = isVarInit trimmedLine && any (`isInfixOf` trimmedLine) [" + ", " - ", " * ", " / ", "//", "%"]
+                
+                -- check conditional statements
+                let lowerClean = map toLower cleanLine
+                let isIf = "if " `isPrefixOf` lowerClean && ":" `isSuffixOf` cleanLine
+                let isElif = "elif " `isPrefixOf` lowerClean && ":" `isSuffixOf` cleanLine
+                let isElse = "else:" `isPrefixOf` lowerClean
+                
+                -- check function declarations and returns
+                let isFunc = "def " `isPrefixOf` trimmedLine
+                let isFuncReturn = "return " `isPrefixOf` trimmedLine
+                
+                -- check variable declarations
+                let isVar = "=" `isInfixOf` trimmedLine && not isPrint && not isArith
+                
+                -- update count variables
+                -- strCount used for variable names in MIPS (i.e. str1, str2, str3, etc.)
+                -- *regCount variables used for register names in MIPS (i.e. $t0, $t1, $t2, $f0, $f1, $f2, etc.)
+                let strCount' = if isPrint then (strCount + 1) else strCount
+                let tregCount' = if isVar then ((tregCount + 1) `rem` 10) else tregCount
+                let fregCount' = if isVar then ((fregCount + 1) `rem` 32) else fregCount
+                
+                -- map a value to each statement type for cleaner evaluation
+                let inBlock = blockType chain /= NoBlock
+                let result
+                      | isPrint = 0
+                      | isIf || isElif || isElse = 3
+                      | inBlock && lineIndent > indentLevel chain = 8
+                      | isVar = 1
+                      | isArith = 2
+                      | isFunc = 6
+                      | isFuncReturn = 7
+                      | otherwise = -1
+                
+                putStrLn $ "DEBUG: Result = " ++ show result
+                -- translate line into MIPS based on the type of statement
+                case result of
+                    0 -> do
+                        -- translate print line
+                        strLiteral <- extractString trimmedLine
+                        translatePrint strLiteral mipsData mipsCode strCount'
+                        putStr "\n"
+                        loop h mipsData mipsCode strCount' tregCount fregCount chain labelCount
+
+                    1 -> do
+                        -- translate simple variable declaration
+                        case extractVariable trimmedLine of
+                            Just (varName, varValue) -> do
+                                putStrLn $ "Var: " ++ varName ++ " = " ++ show varValue
+                                translateVariable varName varValue mipsData mipsCode tregCount' fregCount'
+                            Nothing -> return ()
+                        putStr "\n"
+                        loop h mipsData mipsCode strCount tregCount' fregCount' chain labelCount
+
+                    2 -> do
+                        -- translate two-operand arithmetic operations
+                        case extractOperands trimmedLine of
+                            Just (destVar, lhs, _, op, rhsVal) -> do
+                                putStrLn $ "Arithmetic expression: " ++ destVar ++ " = " ++ lhs ++ " " ++ show op ++ " " ++ renderOperand rhsVal
+                                translateExpression (PyStr destVar) (PyStr lhs) op rhsVal mipsData mipsCode tregCount' fregCount'
+                            Nothing -> return ()
+                        putStr "\n"
+                        loop h mipsData mipsCode strCount tregCount' fregCount' chain labelCount
+
+                    3 -> do
+                        -- translate conditional statement
+                        let lineIndent = length (takeWhile isSpace pyLine)
+                    
+                        case (isIf, isElif, isElse) of
+                          (True, _, _) -> do
+                            putStrLn "IF condition detected"
+                            let freshChain = PyIfChain
+                                  { ifCond = parseCond trimmedLine
+                                  , ifBody = []
+                                  , elifs = []
+                                  , elseBody = Nothing
+                                  , blockType = IfCollecting
+                                  , indentLevel = lineIndent
+                                  }
+                            loop h mipsData mipsCode strCount tregCount fregCount freshChain labelCount
+                    
+                          (_, True, _) -> do
+                            putStrLn "ELIF condition detected"
+                            let flushed = flushCurrentBranch chain
+                            let newChain = PyIfChain
+                                  { ifCond = parseCond trimmedLine
+                                  , ifBody = []
+                                  , elifs = elifs flushed
+                                  , elseBody = elseBody flushed
+                                  , blockType = ElifCollecting
+                                  , indentLevel = lineIndent
+                                  }
+                            loop h mipsData mipsCode strCount tregCount fregCount newChain labelCount
+                    
+                          (_, _, True) -> do
+                            putStrLn "ELSE condition detected"
+                            let flushed = flushCurrentBranch chain
+                            let finalChain = PyIfChain
+                                  { ifCond = ifCond flushed
+                                  , ifBody = []
+                                  , elifs = elifs flushed
+                                  , elseBody = Just []
+                                  , blockType = ElseCollecting
+                                  , indentLevel = lineIndent
+                                  }
+                            loop h mipsData mipsCode strCount tregCount fregCount finalChain labelCount
+                    
+                          _ -> do
+                            if blockType chain /= NoBlock && lineIndent > indentLevel chain then do
+                              -- body of if/elif/else
+                              let stmt = parseStmt trimmedLine
+                              let newChain = addStmtToChain chain stmt
+                              putStr "\n"
+                              loop h mipsData mipsCode strCount tregCount fregCount newChain labelCount
+                            else if blockType chain /= NoBlock then do
+                              -- end of conditional block
+                              let completed = flushCurrentBranch chain
+                              putStrLn $ "  ifCond   = " ++ show (ifCond completed)
+                              putStrLn $ "  ifBody   = " ++ show (ifBody completed)
+                              putStrLn $ "  elifs    = " ++ show (elifs completed)
+                              putStrLn $ "  elseBody = " ++ show (elseBody completed)
+                              putStrLn $ "  block    = " ++ show (blockType completed)
+                              putStrLn $ "  indent   = " ++ show (indentLevel completed)
+                              putStrLn $ "FINALIZING CHAIN: " ++ show completed
+                              labelCount' <- translateIfChain completed mipsData mipsCode labelCount
+                              putStr "\n"
+                              loop h mipsData mipsCode strCount tregCount fregCount emptyChain labelCount'
+                            else do
+                              putStr "\n"
+                              loop h mipsData mipsCode strCount tregCount fregCount chain labelCount
+                    
+                    8 -> do
+                        let stmt = parseStmt trimmedLine
+                        let newChain = addStmtToChain chain stmt
+                        putStr "\n"
+                        loop h mipsData mipsCode strCount tregCount fregCount newChain labelCount
+                    
+                    6 -> do
+                        -- translate function header
+                        putStrLn $ "Function header (code abstracted)"
+                        putStr "\n"
+                        loop h mipsData mipsCode strCount tregCount fregCount chain labelCount
+
+                    7 -> do
+                        -- translate function return statement
+                        putStrLn $ "Function return (code abstracted)"
+                        putStr "\n"
+                        loop h mipsData mipsCode strCount tregCount fregCount chain labelCount
+
+                    -1 -> do
+                        -- display "untestable operation" message and terminate if line is not empty
+                        if (not (isEmpty trimmedLine)) then do
+                            putStrLn $ "Translation stopped: Encountered invalid/untested operation"
+                            exitFailure
+                        else do
+                            putStr "\n"
+                            loop h mipsData mipsCode strCount tregCount fregCount chain labelCount
+
+                    _ -> do
+                        -- display error message (statement should not be reachable due to prior checking)
+                        putStrLn $ "Computation error\n"
+                        loop h mipsData mipsCode strCount tregCount fregCount chain labelCount
