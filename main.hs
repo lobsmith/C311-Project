@@ -31,16 +31,65 @@ data PyCompare = PyEq | PyNEq | PyLT | PyLTE | PyGT | PyGTE deriving Show
 -- write data constructors to define two-operand Python arithmetic expressions
 data PyExpr = VarDecl String PyVar
             | ArithAssign String String PyArith PyVar  -- dest = lhs op rhs
+            deriving Show-- TESTABLE CASES:
+-- SIMPLE PRINT STATEMENTS WITH STRINGS
+-- DECLARING VARIABLES (int, float, bool, string)
+-- SIMPLE TWO-OPERAND ARITHMETIC (+, -, *, /, //, %) (PARTIALLY DONE)
+-- started first steps of conditional statement checking
+-- TESTABLE FRINGE CASES: Python file does not exist or is empty
+-- (will spend significantly more time refining and adding before finished)
+import System.IO                            -- needed for OpenFile
+import Data.List (isPrefixOf, isInfixOf)    -- needed to identify leading keywords ("print") and assignment operator
+import Data.List (delete, stripPrefix)      -- delete removes first occurrence of substring
+import Data.List (dropWhileEnd)             -- needed to trim trailing white space
+import Data.List.Split (splitOn)            -- needed for string extraction (concat)
+import Data.Char (isSpace, toLower)         -- isSpace needed to trim leading and trailing white space, toLower needed for bool variables
+import Data.Char (isPunctuation, isSymbol, isDigit)  -- needed to check for special characters
+import Data.Typeable                        -- needed to determine the type of a variable (using PyVar)
+import Debug.Trace (trace)                  -- used for debugging
+import Data.Maybe (isJust)                  -- needed for conditional statement checking
+import Data.List (isSuffixOf)               -- needed for conditional statement checking
+import qualified Data.Text as T             -- (breakOn, append, drop, length)
+import Control.Monad(unless)                -- needed for function loop
+import Text.Read (readMaybe)                -- needed to parse a string into a data type
+import Control.Exception (catch, IOException, throwIO)  -- needed to check empty file
+import System.IO.Error (isDoesNotExistError)    -- neded to throw exception when Python file does not exist
+import System.Exit (exitFailure)            -- needed to terminate the program when an exception is encountered
+
+-- write data constructors to define Python variable types
+data PyVar = PyInt Integer | PyFloat Float | PyBool Bool | PyStr String | Unknown deriving (Eq, Show)
+
+-- write data constructors to define Python operators (arithmetic and comparison)
+data PyArith = PyAdd | PySub | PyMul | PyDiv | PyFloorDiv | PyMod deriving Show
+data PyCompare = PyEQ | PyNEQ | PyLT | PyLTE | PyGT | PyGTE deriving Show
+
+-- write data constructors to define two-operand Python arithmetic expressions
+data PyExpr = VarDecl String PyVar
+            | ArithAssign String String PyArith PyVar  -- dest = lhs op rhs
             deriving Show
 
 -- write data constructors to define Python conditional keywords (if, elif, else)
-data PyCondWord = PyIf | PyElif deriving Show
-data PyCondFinal = PyElse deriving Show
+data PyCond = PyCond PyVar PyCompare PyVar deriving Show
+
+-- write data constructors to define full conditional statements
+data PyStmt
+  = PyAssign String PyVar
+  | PyPrint PyVar
+  | PyIf PyCond [PyStmt]
+  | PyElif PyCond [PyStmt]
+  | PyElse [PyStmt]
+  deriving Show
 
 -- write data constructors to define simple Python conditional statements
-data PyCondExpr = PyCondWord PyVar PyCompare PyVar      -- i.e. if x == 5, elif y >= x
+{- data PyCondExpr = PyCondWord PyVar PyCompare PyVar      -- i.e. if x == 5, elif y >= x
                 -- | PyCondWord PyVar PyCompare PyVar
-                | PyCondFinal deriving Show     -- else
+                | PyCondFinal deriving Show     -- else -}
+data PyIfChain = PyIfChain
+  { ifCond   :: PyCond
+  , ifBody   :: [PyStmt]
+  , elifs    :: [(PyCond, [PyStmt])]
+  , elseBody :: Maybe [PyStmt]
+  }
 
 -- simple function that removes leading whitespace from a line of code
 -- key benefit: helps eliminate indentation when looking for prefix keywords
@@ -126,6 +175,30 @@ extractOperands trimmed =
               else Nothing
             Nothing -> Nothing
     _ -> Nothing
+
+-- function that parses an if statement line
+extractIfLine :: String -> Maybe String
+extractIfLine trimmed = 
+  let w = words trimmed in
+  case w of
+    ("if":rest) -> Just $ unwords (takeWhile (/= ":") rest)
+    _ -> Nothing
+
+-- function that parses an elif statement line
+extractElifLine :: String -> Maybe String
+extractElifLine trimmed = 
+  let w = words trimmed in
+  case w of
+    ("elif":rest) -> Just $ unwords (takeWhile (/= ":") rest)
+    _ -> Nothing
+
+-- function that parses an else statement line
+extractElseLine :: String -> Maybe String
+extractElseLine trimmed = 
+  let w = words [if c == ':' then ' ' else c | c <- trimmed] in
+  case w of
+    ("else":_) -> Just "else"
+    _ -> Nothing
     
 -- function that parses value string to PyVar (int, float, bool, string types)
 parseValue :: String -> PyVar
@@ -168,8 +241,8 @@ parseArith op =
 parseCompare :: String -> Maybe PyCompare
 parseCompare op = 
   case op of
-    "==" -> Just PyEq
-    "!=" -> Just PyNEq
+    "==" -> Just PyEQ
+    "!=" -> Just PyNEQ
     "<"  -> Just PyLT
     "<=" -> Just PyLTE
     ">"  -> Just PyGT
@@ -397,11 +470,20 @@ loop h mipsData mipsCode strCount tregCount fregCount = do
             
         -- trim whitespace and find whether "print" is a prefix of the full string
         let isPrint = "print(" `isPrefixOf` trimmedLine && not (isSpecial trimmedLine 6)
-        let isArith = any (`isInfixOf` trimmedLine) [" + ", " - ", " * ", " / ", "//", "%"]
-        let isVar = "=" `isInfixOf` trimmedLine && not isPrint && not isArith -- CHECK IF INFIX CHECK IS REDUNDANT
-        let isCond = "if " `isPrefixOf` trimmedLine || "elif " `isPrefixOf` trimmedLine || trimmedLine == "else:"
+        let isArith = isVarInit trimmedLine && any (`isInfixOf` trimmedLine) [" + ", " - ", " * ", " / ", "//", "%"]
+        
+        -- check conditional statements
+        let lowerTrimmed = map toLower trimmedLine
+        let isIf = "if " `isPrefixOf` lowerTrimmed && ":" `isSuffixOf` trimmedLine
+        let isElif = "elif " `isPrefixOf` lowerTrimmed && ":" `isSuffixOf` trimmedLine  
+        let isElse = "else:" `isInfixOf` lowerTrimmed
+        
+        -- check function declarations and returns
         let isFunc = "def " `isPrefixOf` trimmedLine
         let isFuncReturn = "return " `isPrefixOf` trimmedLine
+        
+        -- check variable declarations
+        let isVar = "=" `isInfixOf` trimmedLine && not isPrint && not isArith -- CHECK IF INFIX CHECK IS REDUNDANT
         
         -- update count variables
         -- strCount used for variable names in MIPS (i.e. str1, str2, str3, etc.)
@@ -415,13 +497,13 @@ loop h mipsData mipsCode strCount tregCount fregCount = do
         
         -- map a value to each statement type for cleaner evaluation
         let result = if isPrint then 0 
-                     else if isVar then 1
                      else if isArith then 2
-                     else if isCond then 3
+                     else if (isIf || isElif || isElse) then 3
                      -- else if isCase then 4
                      -- else if isLoop then 5
                      else if isFunc then 6
                      else if isFuncReturn then 7
+                     else if isVar then 1
                      else -1
         
         -- translate line into MIPS based on the type of statement
@@ -449,8 +531,16 @@ loop h mipsData mipsCode strCount tregCount fregCount = do
                         translateExpression (PyStr destVar) (PyStr lhs) op rhsVal mipsData mipsCode tregCount' fregCount'
                     Nothing -> return()
             3 -> do
-                -- translate function header
-                putStrLn $ "Conditional statement (code abstracted)"
+                -- translate conditional statement
+                case (isIf, isElif, isElse) of
+                  (True, _, _)    -> do
+                    putStrLn "IF condition detected"
+                  (_, True, _)    -> do
+                    putStrLn "ELIF condition detected"
+                  (_, _, True)    -> do
+                    putStrLn "ELSE condition detected"
+                  _               -> putStrLn "Invalid conditional"
+                putStrLn $ "CONDITIONAL STATEMENT (code abstracted)"
             6 -> do
                 -- translate function header
                 putStrLn $ "Function header (code abstracted)"
