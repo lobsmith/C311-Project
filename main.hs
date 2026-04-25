@@ -544,7 +544,7 @@ main = do
   print ast
 
   mapM_ (translateStmt mData mCode) ast
-
+  appendFile mCode "\n\t; END PROGRAM"
   appendFile mCode "\n\tjr $ra\n"
 
   dataContents <- readFile mData
