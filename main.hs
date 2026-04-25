@@ -17,11 +17,7 @@ import Data.Maybe (fromMaybe)
 
 -- write data constructors to define Python variables
 data PyVar
-  = PyInt Integer
-  | PyFloat Float
-  | PyBool Bool
-  | PyStr String
-  | Unknown
+  = PyInt Integer | PyFloat Float | PyBool Bool | PyStrLit String | PyVarName String | Unknown
   deriving (Eq, Show)
 
 -- write data constructors to define Python comparison operators
@@ -29,14 +25,20 @@ data PyCompare
   = PyEQ | PyNEQ | PyLT | PyLTE | PyGT | PyGTE
   deriving Show
 
+-- write data constructors to define Python arithmetic operators
+data PyArith
+  = PyAdd | PySub | PyMul | PyDiv | PyFloorDiv | PyMod
+  deriving Show
+
 -- write data constructors to define Python conditional statements
 data PyCond = PyCond PyVar PyCompare PyVar
   deriving Show
 
--- write data constructors to define full Python statements (UPDATED)
+-- write data constructors to define full Python statements
 data PyStmt
   = PyAssign String PyVar
   | PyPrint PyVar
+  | PyArithStmt String PyVar PyArith PyVar
   | PyUnsupported String
   | PyIfStmt PyCond [PyStmt] [(PyCond, [PyStmt])] (Maybe [PyStmt])
   deriving Show
@@ -71,60 +73,77 @@ isValidName (char:trimmed)
         isValidLead char = char `elem` ['a'..'z'] ++ ['A'..'Z'] ++ ['_']
         isValidFollow char = char `elem` ['a'..'z'] ++ ['A'..'Z'] ++ ['_'] ++ ['0'..'9']
 
-evalToRegister :: PyVar -> FilePath -> FilePath -> IO String
+{- evalToRegister :: PyVar -> FilePath -> FilePath -> IO String
 evalToRegister v mData mCode =
   case v of
     PyInt i -> do
-      let r = "$t0"
-      appendFile mCode ("\tli " ++ r ++ ", " ++ show i ++ "\n")
-      return r
+      appendFile mCode ("\tli $t0, " ++ show i ++ "\n")
+      return "$t0"
 
     PyBool b -> do
-      let r = "$t0"
-      appendFile mCode ("\tli " ++ r ++ ", " ++ (if b then "1" else "0") ++ "\n")
-      return r
+      appendFile mCode ("\tli $t0, " ++ (if b then "1" else "0") ++ "\n")
+      return "$t0"
 
-    PyStr s -> do
-      let label = "str_const"
-      appendFile mData (label ++ ": .asciiz " ++ s ++ "\n")
-      return "$a0"
+    PyStrLit s -> do
+      let label = "strLit_" ++ filter (/= ' ') s
+      appendFile mData (label ++ ": .asciiz \"" ++ s ++ "\"\n")
+      return label
+    
+    PyVarName n -> do
+      appendFile mCode ("\tlw $t0, " ++ n ++ "\n")
+      return "$t0"
 
     PyFloat f -> do
-      let r = "$f0"
-      appendFile mCode ("\tl.s " ++ r ++ ", " ++ show f ++ "\n")
-      return r
+      appendFile mCode ("\tl.s $f0, " ++ show f ++ "\n")
+      return "$f0"
 
     Unknown -> do
       appendFile mCode "\tli $t0, 0\n"
+      return "$t0" -}
+evalToRegister :: PyVar -> IO String
+evalToRegister v = do
+  case v of
+    PyInt i -> do
+      return "$t0"
+    PyBool b -> do
+      return "$t0"
+    PyStrLit s -> do
+      let label = "strLit_" ++ filter (/= ' ') s
+      return label
+    PyVarName n -> do
+      return "$t0"
+    PyFloat f -> do
+      return "$f0"
+    Unknown -> do
       return "$t0"
 
 -------- PARSING SECTION --------
 
 parseValue :: String -> PyVar
 parseValue val =
-  let trimmed = noTrailingSpace (noLeadingSpace val)
-  in case trimmed of
-      "True"  -> PyBool True
-      "False" -> PyBool False
-      _ ->
-        case readMaybe trimmed :: Maybe Integer of
-          Just i -> PyInt i
-          Nothing ->
-            case readMaybe trimmed :: Maybe Float of
-              Just f -> PyFloat f
-              Nothing ->
-                if length trimmed >= 2 &&
-                   ((head trimmed == '"' && last trimmed == '"') ||
-                    (head trimmed == '\'' && last trimmed == '\''))
-                then PyStr (init (tail trimmed))
-                else Unknown
+  let cleaned = noTrailingSpace (noLeadingSpace val)
+      token = takeWhile (\c -> c /= ')' && c /= '(' && c /= ',') cleaned
+  in
+    if token == "True" then PyBool True
+    else if token == "False" then PyBool False
+    else case readMaybe token :: Maybe Integer of
+      Just n -> PyInt n
+      Nothing -> case readMaybe token :: Maybe Float of
+        Just f -> PyFloat f
+        Nothing ->
+          if length token >= 2 &&
+             ((head token == '"' && last token == '"') ||
+              (head token == '\'' && last token == '\''))
+          then PyStrLit (init (tail token))
+          else PyVarName token
 
 prettyPyVar :: PyVar -> String
-prettyPyVar (PyInt i) = show i
-prettyPyVar (PyFloat f) = show f
-prettyPyVar (PyBool b) = map toLower (show b)
-prettyPyVar (PyStr s) = s
-prettyPyVar Unknown = "?"
+prettyPyVar (PyInt i)      = show i
+prettyPyVar (PyFloat f)    = show f
+prettyPyVar (PyBool b)     = (if b then "1" else "0") -- map toLower (show b)
+prettyPyVar (PyStrLit sl)  = sl
+prettyPyVar (PyVarName sn) = sn
+prettyPyVar Unknown        = "?"
 
 parseCompare :: String -> Maybe PyCompare
 parseCompare op =
@@ -135,6 +154,17 @@ parseCompare op =
     "<=" -> Just PyLTE
     ">"  -> Just PyGT
     ">=" -> Just PyGTE
+    _    -> Nothing
+
+parseArith :: String -> Maybe PyArith
+parseArith op =
+  case op of
+    "+"  -> Just PyAdd
+    "-"  -> Just PySub
+    "*"  -> Just PyMul
+    "/"  -> Just PyDiv
+    "//" -> Just PyFloorDiv
+    "%"  -> Just PyMod
     _    -> Nothing
 
 parseCond :: String -> PyCond
@@ -161,6 +191,12 @@ parseCond line =
         let (l,r) = splitOnce op body
         in PyCond (parseValue l) (fromMaybe PyEQ (parseCompare op)) (parseValue r)
       Nothing -> PyCond Unknown PyEQ Unknown
+
+parseCondVar :: String -> PyVar
+parseCondVar s =
+  case parseValue s of
+    Unknown -> PyVarName s
+    v       -> v
 
 splitOnce :: String -> String -> (String, String)
 splitOnce op s =
@@ -205,15 +241,32 @@ parseBlock indent allLines@(line:rest)
 parseStmt :: Int -> [String] -> (PyStmt, [String])
 parseStmt indent (line:rest)
   | isIfLine trimmed = parseIf indent (line:rest)
+  {- | isPrintLine trimmed =
+    case extractStringPure trimmed of
+      Just str ->
+        (PyPrint (PyStrLit str), rest)
+      Nothing ->
+        (PyPrint (parseValue (extractPrint trimmed)), rest)-} -- MAY NEED TO CHECK PY_STR_LIT vs. PY_VAR_NAME HERE
   | isPrintLine trimmed =
-      (PyPrint (PyStr (extractStringPure trimmed)), rest)
+      let arg = parseValue (extractPrint trimmed)
+      in (PyPrint arg, rest)
   | isVarInit trimmed =
       case extractVariable trimmed of
         Just (name, val) -> (PyAssign name val, rest)
         Nothing -> (PyUnsupported trimmed, rest)
+  | isArithLine trimmed =
+      case extractOperands trimmed of
+        Just (d,l,o,r) -> (PyArithStmt d l o r, rest)
+        Nothing -> (PyUnsupported trimmed, rest)
   | otherwise = (PyUnsupported trimmed, rest)
   where
     trimmed = noLeadingSpace line
+    
+    isArithLine :: String -> Bool
+    isArithLine s =
+      case words s of
+        (_ : "=" : _ : op : _) -> op `elem` ["+","-","*","/","//","%"]
+        _ -> False
 
 -------- CONDITIONAL PARSING --------
 
@@ -252,8 +305,9 @@ extractVariable s =
 
 extractPrint :: String -> String
 extractPrint s =
-  let x = dropWhile (/= '(') s
-  in take (length x - 1) (drop 1 x)
+  let inside = dropWhile (/= '(') s
+      content = takeWhile (/= ')') (drop 1 inside)
+  in noLeadingSpace (noTrailingSpace content)
 
 -- helper checks
 isIfLine s = "if " `isPrefixOf` s
@@ -261,44 +315,109 @@ isElifLine s = "elif " `isPrefixOf` s
 isElseLine s = "else:" `isPrefixOf` s
 isPrintLine s = "print(" `isPrefixOf` s
 
--- reuse your string extraction logic
-extractStringPure :: String -> String
-extractStringPure trimmed =
-  let extracted = maybe trimmed id (stripPrefix "print(" trimmed)
-      noParen = init (noTrailingSpace extracted)
-  in noLeadingSpace noParen
+-- function that extracts operands of a arithmetic expression
+extractOperands :: String -> Maybe (String, PyVar, PyArith, PyVar)
+extractOperands line =
+  case words line of
+    (dest : "=" : lhs : op : rhsParts) -> do
+      arithOp <- parseArith op
+      let rhs = unwords rhsParts
+
+      let lhsVar = parseValue lhs
+      let rhsVar = parseValue rhs
+
+      return (dest, lhsVar, arithOp, rhsVar)
+
+    _ -> Nothing
+
+-- function that extracts a string from a print statement
+extractStringPure :: String -> Maybe String
+extractStringPure line =
+  let inner = dropWhile (/= '(') line
+      content = takeWhile (/= ')') (drop 1 inner)
+      trimmed = noLeadingSpace (noTrailingSpace content)
+  in
+    if isQuotedString trimmed
+      then Just (stripQuotes trimmed)
+      else Nothing
+
+isQuotedString :: String -> Bool
+isQuotedString s =
+  (head s == '"' && last s == '"') ||
+  (head s == '\'' && last s == '\'')
+
+stripQuotes :: String -> String
+stripQuotes s = init (tail s)
 
 translateStmt :: FilePath -> FilePath -> PyStmt -> IO ()
 translateStmt mData mCode stmt =
   case stmt of
     PyPrint v -> do
-      -- appendFile mData ("var: .asciiz \"" ++ extractStringPure stmt ++ "\"\n")
-      appendFile mCode "\t# PRINT STATEMENT\n"
-
-      -- evaluate value into register
-      reg <- evalToRegister v mData mCode
-
-      -- move into register based on type
+      reg <- evalToRegister v
+    
       case v of
-        PyFloat _ -> appendFile mCode ("\tmov.s $f12, " ++ reg ++ "\n")
-        PyStr _   -> appendFile mCode ("\tla $a0, str_const\n")
-        _         -> appendFile mCode ("\tmove $a0, " ++ reg ++ "\n")
-        
-      -- select syscall type
-      case v of
-        PyStr _ -> appendFile mCode "\tli $v0, 4\n"
-        PyFloat _ -> appendFile mCode "\tli $v0, 2\n"
-        _ -> appendFile mCode "\tli $v0, 1\n"
-
+        PyStrLit _ -> do
+          appendFile mCode "\t# PRINT STATEMENT (STRING LITERAL)\n"
+          appendFile mCode "\tli $v0, 4\n"
+          appendFile mCode ("\tla $a0, " ++ reg ++ "\n")
+        PyInt _ -> do
+          appendFile mCode "\t# PRINT STATEMENT (INTEGER)\n"
+          appendFile mCode "\tli $v0, 1\n"
+          appendFile mCode ("\tmove $a0, " ++ reg ++ "\n")
+        PyBool _ -> do
+          appendFile mCode "\t# PRINT STATEMENT (BOOLEAN CONVERTED TO INTEGER)\n"
+          appendFile mCode "\tli $v0, 1\n"
+          appendFile mCode ("\tmove $a0, " ++ reg ++ "\n")
+        PyFloat _ -> do
+          appendFile mCode "\t# PRINT STATEMENT (FLOAT)\n"
+          appendFile mCode "\tli $v0, 2\n"
+          appendFile mCode ("\tmov.s $f12, " ++ reg ++ "\n")
+        PyVarName _ -> do
+          appendFile mCode "\t# PRINT STATEMENT (VARIABLE)\n"
+          appendFile mCode "\tli $v0, 1\n"
+          appendFile mCode ("\tmove $a0, " ++ reg ++ "\n")
+    
       appendFile mCode "\tsyscall\n\n"
 
     PyAssign n v -> do
-      appendFile mData (n ++ ":\t.word " ++ prettyPyVar v ++ "\n")
+      -- reg <- evalToRegister v mData mCode
+      appendFile mData "# ASSIGNMENT FROM TRANSLATE_STMT "
+      case v of
+        PyStrLit _ -> appendFile mData (n ++ ":\t.asciiz \"" ++ prettyPyVar v ++ "\"\n")
+        PyInt _ -> appendFile mData (n ++ ":\t.word " ++ prettyPyVar v ++ "\n")
+        PyBool _ -> appendFile mData (n ++ ":\t.word " ++ prettyPyVar v ++ "\t\t\t# BOOLEAN DECLARATION\n")
+        PyFloat _ -> appendFile mData (n ++ ":\t.float " ++ prettyPyVar v ++ "\n")
+        PyVarName x -> do
+          -- load value from existing variable x into register
+          loadVarToReg (PyVarName x) "t0" mCode
+    
+          -- store into destination variable n
+          appendFile mData (n ++ ":\t.word 0 \t# VARIABLE = VARIABLE\n")
+          appendFile mCode ("\t# VARIABLE = VARIABLE\n")
+          appendFile mCode ("\tsw $t0, " ++ n ++ "\n")
+    
+        Unknown ->
+          appendFile mData (n ++ ":\t.word 0\n")
+    
+    PyArithStmt dest lhs op rhs -> do
+      appendFile mCode "\t# ARITHMETIC OPERATION\n"
+    
+      let r1 = "t0"
+      let r2 = "t1"
+      let rd = "t2"
+    
+      loadVarToReg lhs r1 mCode
+      loadVarToReg rhs r2 mCode
+    
+      emitArith op r1 r2 rd mCode
+    
+      appendFile mData (dest ++ ": .word 0\n")
+      appendFile mCode ("\tsw " ++ rd ++ ", " ++ dest ++ "\n\n")
 
     PyIfStmt c ifb elb elseb -> do
       let endLabel = "end_if"
     
-      -- heck if condition
+      -- check if condition
       appendFile mCode ("\t# IF CONDITION\n")
       emitCondJump c (firstElifLabel elb elseb) mCode
     
@@ -350,19 +469,9 @@ nextLabel i elb elseb
         Just _  -> "else"
         Nothing -> "end_if"
 
-translatePrint :: String -> FilePath -> FilePath -> IO ()
-translatePrint str mData mCode = do
-  appendFile mData ("str_label: .asciiz \"" ++ str ++ "\"\n")
-
-  appendFile mCode $
-    "\tli $v0, 4\n" ++
-    "\tla $a0, str_label\n" ++
-    "\tsyscall\n\n"
-
 translateVariable :: String -> PyVar -> FilePath -> FilePath -> IO ()
 translateVariable name val mData mCode =
   case val of
-
     PyInt i ->
       appendFile mData (name ++ ": .word " ++ show i ++ "\n")
 
@@ -372,7 +481,10 @@ translateVariable name val mData mCode =
     PyFloat f ->
       appendFile mData (name ++ ": .float " ++ show f ++ "\n")
 
-    PyStr s ->
+    PyStrLit s ->
+      appendFile mData (name ++ ": .asciiz \"" ++ s ++ "\"\n")
+    
+    PyVarName s ->
       appendFile mData (name ++ ": .asciiz \"" ++ s ++ "\"\n")
 
     Unknown ->
@@ -449,15 +561,82 @@ emitCondJump (PyCond lhs cmp rhs) failLabel mCode = do
     PyGT  -> appendFile mCode ("\tble $t0, $t1, " ++ failLabel ++ "\n")
     PyGTE -> appendFile mCode ("\tblt $t0, $t1, " ++ failLabel ++ "\n")
 
+emitArith :: PyArith -> String -> String -> String -> FilePath -> IO ()
+emitArith op r1 r2 dest mCode =
+  case op of
+    -- translate addition operation
+    PyAdd ->
+      appendFile mCode ("\tadd " ++ dest ++ ", " ++ r1 ++ ", " ++ r2 ++ "\n")
+
+    -- translate subtraction operation
+    PySub ->
+      appendFile mCode ("\tsub " ++ dest ++ ", " ++ r1 ++ ", " ++ r2 ++ "\n")
+
+    -- translate multiplication operation
+    PyMul ->
+      appendFile mCode ("\tmul " ++ dest ++ ", " ++ r1 ++ ", " ++ r2 ++ "\n")
+
+    -- translate integer division operation
+    PyDiv -> do
+      appendFile mCode ("\tdiv " ++ r1 ++ ", " ++ r2 ++ "\n")
+      appendFile mCode ("\tmflo " ++ dest ++ "\n")
+
+    -- translate floor divide operation
+    PyFloorDiv -> do
+      appendFile mCode ("\tdiv " ++ r1 ++ ", " ++ r2 ++ "\n")
+      appendFile mCode ("\tmflo " ++ dest ++ "\n")
+
+    -- translate modulo operation
+    PyMod -> do
+      appendFile mCode ("\tdiv " ++ r1 ++ ", " ++ r2 ++ "\n")
+      appendFile mCode ("\tmfhi " ++ dest ++ "\n")
+
 -- helper function that renders variables and registers
 loadVarToReg :: PyVar -> String -> FilePath -> IO ()
 loadVarToReg var reg mCode = do
+  let isFloatReg = head reg == 'f'
   case var of
-    PyInt i   -> appendFile mCode $ "\tli $" ++ reg ++ ", " ++ show i ++ "\n"
-    PyFloat f -> appendFile mCode $ "\tli.s $" ++ reg ++ ", " ++ show f ++ "\n"
-    PyStr s   -> appendFile mCode $ "\tla $" ++ reg ++ ", " ++ s ++ "\n"
-    PyBool b  -> appendFile mCode $ "\tli $" ++ reg ++ ", " ++ (if b then "1" else "0") ++ "\n"
-    Unknown   -> appendFile mCode $ "\tli $" ++ reg ++ ", 0\n"
+    -- translate integer type
+    PyInt i ->
+      if isFloatReg then do
+        appendFile mCode $ "\tli $t9, " ++ show i ++ "\n"
+        appendFile mCode $ "\tmtc1 $t9, $" ++ reg ++ "\n"
+        appendFile mCode $ "\tcvt.s.w $" ++ reg ++ ", $" ++ reg ++ "\n"
+      else
+        appendFile mCode $ "\tli $" ++ reg ++ ", " ++ show i ++ "\n"
+
+    -- translate float type
+    PyFloat f ->
+      if isFloatReg then
+        appendFile mCode $ "\tli.s $" ++ reg ++ ", " ++ show f ++ "\n"
+      else do
+        appendFile mCode $ "\tli.s $f9, " ++ show f ++ "\n"
+        appendFile mCode $ "\tmfc1 $" ++ reg ++ ", $f9\n"
+
+    -- translate boolean type
+    PyBool b ->
+      appendFile mCode $ "\tli $" ++ reg ++ ", " ++ (if b then "1" else "0") ++ "\n"
+
+    -- translate string literal
+    PyStrLit s -> do
+      -- let label = "str_const_" ++ filter (/= ' ') s
+      -- appendFile mCode $ label ++ ": .asciiz \"" ++ s ++ "\"\n"
+      -- appendFile mCode $ "\tla $" ++ reg ++ ", " ++ label ++ "\n"
+      appendFile mCode $ "\tla $" ++ reg ++ ", str_const_" ++ filter (/= ' ') s ++ "\n"
+      -- return ("strLit_" ++ filter (/= ' ') s)
+
+    -- translate variable name
+    PyVarName name ->
+      if isFloatReg then do
+        appendFile mCode $ "\tlw $t9, " ++ name ++ "\n"
+        appendFile mCode $ "\tmtc1 $t9, $" ++ reg ++ "\n"
+        appendFile mCode $ "\tcvt.s.w $" ++ reg ++ ", $" ++ reg ++ "\n"
+      else
+        appendFile mCode $ "\tlw $" ++ reg ++ ", " ++ name ++ "\n"
+
+    -- translate unknown type
+    Unknown ->
+      appendFile mCode $ "\tli $" ++ reg ++ ", 0\n"
 
 main :: IO ()
 main = do
@@ -476,11 +655,10 @@ main = do
     else throwIO e
 
   let ast = parseProgram (lines contents)
-
   print ast
 
   mapM_ (translateStmt mData mCode) ast
-  appendFile mCode "\n\t; END PROGRAM"
+  appendFile mCode "\n\t# END PROGRAM"
   appendFile mCode "\n\tjr $ra\n"
 
   dataContents <- readFile mData
