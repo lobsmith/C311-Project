@@ -268,64 +268,6 @@ extractStringPure trimmed =
       noParen = init (noTrailingSpace extracted)
   in noLeadingSpace noParen
 
---------------------------------------------------------------------------------
--- CONDITIONAL PARSER (CORE FIX)
---------------------------------------------------------------------------------
-
--- function that parses a full conditional statement (if / elif / else)
-{- parseIf :: Int -> [String] -> (PyStmt, [String])
-parseIf indent (line:rest) =
-  let cond = parseCond line
-
-      -- parse IF body
-      (ifBody, afterIf) = parseBlock (indent + 4) rest
-
-      -- parse ELIF and ELSE chains
-      (elifs, elseBody, remaining) = parseElifElse indent afterIf
-
-  in (PyIfStmt cond ifBody elifs elseBody, remaining)
-
--- function that parses elif and else blocks following an if
-parseElifElse :: Int -> [String]
-              -> ([(PyCond, [PyStmt])], Maybe [PyStmt], [String])
-parseElifElse indent allLines@(line:rest)
-  | isElifLine trimmed =
-      let cond = parseCond line
-          (body, afterElif) = parseBlock (indent + 4) rest
-          (elifs, elseBody, remaining) = parseElifElse indent afterElif
-      in ((cond, body) : elifs, elseBody, remaining)
-
-  | isElseLine trimmed =
-      let (body, remaining) = parseBlock (indent + 4) rest
-      in ([], Just body, remaining)
-
-  | otherwise = ([], Nothing, allLines)
-
-  where
-    trimmed = noLeadingSpace line
-
-parseElifElse _ [] = ([], Nothing, []) -}
-
---------------------------------------------------------------------------------
--- TRANSLATION ENTRY (REPLACES LOOP-DRIVEN TRANSLATION)
---------------------------------------------------------------------------------
-
--- function that translates a parsed statement into MIPS
-{- translateStmt :: FilePath -> FilePath -> PyStmt -> IO ()
-translateStmt mData mCode stmt =
-  case stmt of
-    PyPrint val ->
-      translatePrint (prettyPyVar val) mData mCode 0
-
-    PyAssign name val ->
-      translateVariable name val mData mCode 0 0
-
-    PyIfStmt cond ifBody elifs elseBody ->
-      translateIf cond ifBody elifs elseBody mData mCode 0
-
-    PyUnsupported s ->
-      putStrLn $ "Skipping unsupported: " ++ s -}
-
 translateStmt :: FilePath -> FilePath -> PyStmt -> IO ()
 translateStmt mData mCode stmt =
   case stmt of
@@ -436,11 +378,7 @@ translateVariable name val mData mCode =
     Unknown ->
       appendFile mData (name ++ ": .word 0\n")
 
-
-
---------------------------------------------------------------------------------
--- CONDITIONAL TRANSLATION (REPLACES translateIfChain)
---------------------------------------------------------------------------------
+-------- CONDITIONAL STATEMENTS --------
 
 -- function that translates a conditional statement
 translateIf :: PyCond -> [PyStmt] -> [(PyCond, [PyStmt])] -> Maybe [PyStmt] -> FilePath -> FilePath -> Int -> IO ()
@@ -476,8 +414,6 @@ translateIf cond ifBody elifs elseBody mData mCode labelId = do
     firstLabel _ _ i        = "elif_0_" ++ show i
 
 -- helper for elif translation
--- translateElif :: FilePath -> FilePath -> String -> (Int, (PyCond, [PyStmt])) -> IO ()
--- translateElif mData mCode endLabel (i, (cond, body)) = do
 translateElif :: FilePath -> FilePath -> String -> Int -> (Int, (PyCond, [PyStmt])) -> IO ()
 translateElif mData mCode endLabel baseId (i, (cond, body)) = do
   -- define first elif label
