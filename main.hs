@@ -1,7 +1,8 @@
 -- TESTABLE CASES:
--- SIMPLE PRINT STATEMENTS WITH STRINGS
+-- SIMPLE PRINT STATEMENTS
 -- DECLARING VARIABLES (int, float, bool, string)
 -- SIMPLE CONDITIONAL STATEMENTS
+-- TWO-OPERAND ARITHMETIC
 -- TESTABLE FRINGE CASES: Python file does not exist or is empty
 import System.IO                            -- file handling
 import Control.Monad (unless, mapM_)        -- loop control
@@ -144,7 +145,7 @@ parseValue val =
 prettyPyVar :: PyVar -> String
 prettyPyVar (PyInt i)      = show i
 prettyPyVar (PyFloat f)    = show f
-prettyPyVar (PyBool b)     = (if b then "1" else "0") -- map toLower (show b)
+prettyPyVar (PyBool b)     = (if b then "1" else "0")
 prettyPyVar (PyStrLit sl)  = sl
 prettyPyVar (PyVarName sn) = sn
 prettyPyVar Unknown        = "?"
@@ -171,6 +172,20 @@ parseArith op =
     "%"  -> Just PyMod
     _    -> Nothing
 
+parseSimpleExpr :: String -> PyVar
+parseSimpleExpr s =
+  let t = noLeadingSpace (noTrailingSpace s)
+  in case readMaybe t :: Maybe Integer of
+      Just n  -> PyInt n
+      Nothing ->
+        if all isAlphaNumOrUnderscore t
+        then PyVarName t
+        else Unknown
+
+isAlphaNumOrUnderscore :: Char -> Bool
+isAlphaNumOrUnderscore c =
+  c `elem` (['a'..'z'] ++ ['A'..'Z'] ++ ['0'..'9'] ++ "_")
+
 parseCond :: String -> PyCond
 parseCond line =
   let clean = noTrailingSpace (noLeadingSpace line)
@@ -179,9 +194,12 @@ parseCond line =
         else if "elif " `isPrefixOf` clean then drop 5 clean
         else clean
 
-      body = if not (null stripped) && last stripped == ':'
-             then init stripped
-             else stripped
+      bodyRaw =
+        if not (null stripped) && last stripped == ':'
+        then init stripped
+        else stripped
+    
+      body = stripParens bodyRaw
 
       ops = ["==","!=","<=",">=","<",">"]
 
@@ -214,6 +232,13 @@ breakOn op s = go "" s
       | op `isPrefixOf` xs = (reverse acc, xs)
       | null xs = (reverse acc, "")
       | otherwise = go (head xs : acc) (tail xs)
+
+stripParens :: String -> String
+stripParens s =
+  let t = noLeadingSpace (noTrailingSpace s)
+  in if not (null t) && head t == '(' && last t == ')'
+     then init (tail t)
+     else t
       
 -------- INDENTATION & STATEMENT PARSING --------
 
@@ -251,6 +276,10 @@ parseStmt indent (line:rest)
         (PyPrint (PyStrLit str), rest)
       Nothing ->
         (PyPrint (parseValue (extractPrint trimmed)), rest)-} -- MAY NEED TO CHECK PY_STR_LIT vs. PY_VAR_NAME HERE
+  | isArithLine trimmed =
+      case extractOperands trimmed of
+        Just (d,l,o,r) -> (PyArithStmt d l o r, rest)
+        Nothing -> (PyUnsupported trimmed, rest)
   | isPrintLine trimmed =
       let arg = parseValue (extractPrint trimmed)
       in (PyPrint arg, rest)
@@ -258,19 +287,13 @@ parseStmt indent (line:rest)
       case extractVariable trimmed of
         Just (name, val) -> (PyAssign name val, rest)
         Nothing -> (PyUnsupported trimmed, rest)
-  | isArithLine trimmed =
-      case extractOperands trimmed of
-        Just (d,l,o,r) -> (PyArithStmt d l o r, rest)
-        Nothing -> (PyUnsupported trimmed, rest)
   | otherwise = (PyUnsupported trimmed, rest)
   where
     trimmed = noLeadingSpace line
     
     isArithLine :: String -> Bool
     isArithLine s =
-      case words s of
-        (_ : "=" : _ : op : _) -> op `elem` ["+","-","*","/","//","%"]
-        _ -> False
+      any (`isInfixOf` s) ["+", "-", "*", "/", "//", "%"]
 
 -------- CONDITIONAL PARSING --------
 
@@ -297,6 +320,7 @@ parseElifs indent all@(l:ls)
   | otherwise = ([], Nothing, all)
 
   where trim = noLeadingSpace l
+  
 parseElifs _ [] = ([], Nothing, [])
 
 -------- VARIABLE EXTRACTION --------
@@ -319,20 +343,23 @@ isElifLine s = "elif " `isPrefixOf` s
 isElseLine s = "else:" `isPrefixOf` s
 isPrintLine s = "print(" `isPrefixOf` s
 
--- function that extracts operands of a arithmetic expression
+-- function that extracts operands of an arithmetic expression
 extractOperands :: String -> Maybe (String, PyVar, PyArith, PyVar)
 extractOperands line =
   case words line of
-    (dest : "=" : lhs : op : rhsParts) -> do
-      arithOp <- parseArith op
-      let rhs = unwords rhsParts
-
-      let lhsVar = parseValue lhs
-      let rhsVar = parseValue rhs
-
-      return (dest, lhsVar, arithOp, rhsVar)
-
+    (dest : "=" : rest) ->
+      let (lhsParts, op:rhsParts) = break isOp rest
+          opStr = op
+          lhs = unwords lhsParts
+          rhs = unwords rhsParts
+      in do
+        arithOp <- parseArith opStr
+        return (dest, parseSimpleExpr lhs, arithOp, parseSimpleExpr rhs)
     _ -> Nothing
+  where
+    isOp x = x `elem` ["+", "-", "*", "/", "//", "%"]
+
+trim = noLeadingSpace . noTrailingSpace
 
 -- function that extracts a string from a print statement
 extractStringPure :: String -> Maybe String
@@ -403,12 +430,12 @@ translateStmt env mData mCode stmt =
       let (envMap, counter) = env
       let envMap' = Map.insert n v envMap
   
-      appendFile mData "# ASSIGNMENT FROM TRANSLATE_STMT "
+      -- appendFile mData "# ASSIGNMENT FROM TRANSLATE_STMT "
       case v of
-        PyStrLit _ -> appendFile mData (n ++ ":\t.asciiz \"" ++ prettyPyVar v ++ "\"\n")
-        PyInt _ -> appendFile mData (n ++ ":\t.word " ++ prettyPyVar v ++ "\n")
+        PyStrLit _ -> appendFile mData (n ++ ":\t.asciiz \"" ++ prettyPyVar v ++ "\"\t\t\t# STRING DECLARATION\n")
+        PyInt _ -> appendFile mData (n ++ ":\t.word " ++ prettyPyVar v ++ "\t\t\t# INTEGER DECLARATION\n")
         PyBool _ -> appendFile mData (n ++ ":\t.word " ++ prettyPyVar v ++ "\t\t\t# BOOLEAN DECLARATION\n")
-        PyFloat _ -> appendFile mData (n ++ ":\t.float " ++ prettyPyVar v ++ "\n")
+        PyFloat _ -> appendFile mData (n ++ ":\t.float " ++ prettyPyVar v ++ "\t\t\t# FLOAT DECLARATION\n")
         PyVarName x -> do
           -- load value from existing variable x into register
           loadVarToReg (PyVarName x) "t0" mCode
@@ -435,8 +462,11 @@ translateStmt env mData mCode stmt =
     
       emitArith op r1 r2 rd mCode
     
-      appendFile mData (dest ++ ": .word 0\n")
-      appendFile mCode ("\tsw " ++ rd ++ ", " ++ dest ++ "\n\n")
+      let (envMap, c) = env
+      if Map.member dest envMap
+        then return ()
+        else appendFile mData (dest ++ ": .word 0\t\t\t# USED FOR ARITHMETIC OPERATION\n")
+      appendFile mCode ("\tsw $" ++ rd ++ ", " ++ dest ++ "\t\t\t\t# STORE RESULT\n\n")
       return env
 
     PyIfStmt cond ifBody elifs elseBody -> do
@@ -626,30 +656,36 @@ emitArith op r1 r2 dest mCode =
   case op of
     -- translate addition operation
     PyAdd ->
-      appendFile mCode ("\tadd " ++ dest ++ ", " ++ r1 ++ ", " ++ r2 ++ "\n")
+      appendFile mCode ("\tadd $" ++ dest ++ ", $" ++ r1 ++ ", $" ++ r2 ++ "\t\t\t# ADDITION\n")
 
     -- translate subtraction operation
     PySub ->
-      appendFile mCode ("\tsub " ++ dest ++ ", " ++ r1 ++ ", " ++ r2 ++ "\n")
+      appendFile mCode ("\tsub $" ++ dest ++ ", $" ++ r1 ++ ", $" ++ r2 ++ "\t\t\t# SUBTRACTION\n")
 
     -- translate multiplication operation
     PyMul ->
-      appendFile mCode ("\tmul " ++ dest ++ ", " ++ r1 ++ ", " ++ r2 ++ "\n")
+      appendFile mCode ("\tmul $" ++ dest ++ ", $" ++ r1 ++ ", $" ++ r2 ++ "\t\t\t# MULTIPLICATION\n")
 
-    -- translate integer division operation
+    -- translate standard division operation
     PyDiv -> do
-      appendFile mCode ("\tdiv " ++ r1 ++ ", " ++ r2 ++ "\n")
-      appendFile mCode ("\tmflo " ++ dest ++ "\n")
+      appendFile mCode ("\tdiv $" ++ r1 ++ ", $" ++ r2 ++ "\t\t\t# STANDARD DIVISION\n")
+      appendFile mCode ("\tmflo $" ++ dest ++ "\t\t\t\t# MOVE QUOTIENT\n")
+      appendFile mCode ("\tmfhi $" ++ r2 ++ "\t\t\t\t# MOVE REMAINDER\n")
 
     -- translate floor divide operation
     PyFloorDiv -> do
-      appendFile mCode ("\tdiv " ++ r1 ++ ", " ++ r2 ++ "\n")
-      appendFile mCode ("\tmflo " ++ dest ++ "\n")
+      appendFile mCode ("\tdiv $" ++ r1 ++ ", $" ++ r2 ++ "\t\t\t# FLOOR DIVISION\n")
+      appendFile mCode ("\tmflo $" ++ dest ++ "\t\t\t\t# MOVE QUOTIENT (NO NEED FOR REMAINDER)\n")
 
     -- translate modulo operation
     PyMod -> do
-      appendFile mCode ("\tdiv " ++ r1 ++ ", " ++ r2 ++ "\n")
-      appendFile mCode ("\tmfhi " ++ dest ++ "\n")
+      appendFile mCode ("\tdiv $" ++ r1 ++ ", $" ++ r2 ++ "\t\t\t# MODULO\n")
+      appendFile mCode ("\tmfhi $" ++ dest ++ "\t\t\t\t# MOVE REMAINDER (NO NEED FOR QUOTIENT)\n")
+
+-- helper function for formatting registers
+formatReg :: String -> String
+formatReg r =
+  if head r == '$' then r else "$" ++ r
 
 -- helper function that renders variables and registers
 loadVarToReg :: PyVar -> String -> FilePath -> IO ()
@@ -729,3 +765,4 @@ main = do
   writeFile mFinal (dataContents ++ "\n" ++ codeContents)
 
   putStrLn "Writing to assembly.s successful"
+  
