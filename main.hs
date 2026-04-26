@@ -5,12 +5,14 @@
 -- TESTABLE FRINGE CASES: Python file does not exist or is empty
 import System.IO                            -- file handling
 import Control.Monad (unless, mapM_)        -- loop control
+import Control.Monad (foldM)
 import Control.Exception (catch, IOException, throwIO)
 import System.IO.Error (isDoesNotExistError)
 import System.Exit (exitFailure)
 import Data.List (dropWhileEnd, stripPrefix)
 import Data.List (isPrefixOf, isInfixOf, isSuffixOf)
 import Data.Char (isSpace, toLower)
+import qualified Data.Map as Map
 
 import Text.Read (readMaybe)
 import Data.Maybe (fromMaybe)
@@ -42,6 +44,9 @@ data PyStmt
   | PyUnsupported String
   | PyIfStmt PyCond [PyStmt] [(PyCond, [PyStmt])] (Maybe [PyStmt])
   deriving Show
+
+-- declare type for displaying string variable values
+type Env = (Map.Map String PyVar, Int)
 
 -- simple function that removes leading whitespace from a line of code
 -- key benefit: helps eliminate indentation when looking for prefix keywords
@@ -85,7 +90,7 @@ evalToRegister v mData mCode =
       return "$t0"
 
     PyStrLit s -> do
-      let label = "strLit_" ++ filter (/= ' ') s
+      let label = "strLit_" ++ sanitizeLabel s
       appendFile mData (label ++ ": .asciiz \"" ++ s ++ "\"\n")
       return label
     
@@ -108,7 +113,7 @@ evalToRegister v = do
     PyBool b -> do
       return "$t0"
     PyStrLit s -> do
-      let label = "strLit_" ++ filter (/= ' ') s
+      let label = "strLit_" ++ sanitizeLabel s
       return label
     PyVarName n -> do
       return "$t0"
@@ -122,20 +127,19 @@ evalToRegister v = do
 parseValue :: String -> PyVar
 parseValue val =
   let cleaned = noTrailingSpace (noLeadingSpace val)
-      token = takeWhile (\c -> c /= ')' && c /= '(' && c /= ',') cleaned
-  in
-    if token == "True" then PyBool True
-    else if token == "False" then PyBool False
-    else case readMaybe token :: Maybe Integer of
-      Just n -> PyInt n
-      Nothing -> case readMaybe token :: Maybe Float of
-        Just f -> PyFloat f
-        Nothing ->
-          if length token >= 2 &&
-             ((head token == '"' && last token == '"') ||
-              (head token == '\'' && last token == '\''))
-          then PyStrLit (init (tail token))
-          else PyVarName token
+  in case cleaned of
+      ('"':xs) | last xs == '"' -> PyStrLit (init xs)
+      ('\'':xs) | last xs == '\'' -> PyStrLit (init xs)
+      _ ->
+        case readMaybe cleaned :: Maybe Integer of
+          Just n -> PyInt n
+          Nothing ->
+            case readMaybe cleaned :: Maybe Float of
+              Just f -> PyFloat f
+              Nothing ->
+                if cleaned == "True" then PyBool True
+                else if cleaned == "False" then PyBool False
+                else PyVarName cleaned
 
 prettyPyVar :: PyVar -> String
 prettyPyVar (PyInt i)      = show i
@@ -349,38 +353,56 @@ isQuotedString s =
 stripQuotes :: String -> String
 stripQuotes s = init (tail s)
 
-translateStmt :: FilePath -> FilePath -> PyStmt -> IO ()
-translateStmt mData mCode stmt =
+sanitizeLabel :: String -> String
+sanitizeLabel =
+  map (\c -> if c `elem` " ,.!?:;'\"()[]{}-" then '_' else c)
+
+translateStmt :: Env -> FilePath -> FilePath -> PyStmt -> IO Env
+translateStmt env mData mCode stmt =
   case stmt of
     PyPrint v -> do
-      reg <- evalToRegister v
-    
       case v of
-        PyStrLit _ -> do
-          appendFile mCode "\t# PRINT STATEMENT (STRING LITERAL)\n"
+    
+        PyStrLit s -> do
+          let label = "strLit_" ++ sanitizeLabel s
+          appendFile mData (label ++ ": .asciiz \"" ++ s ++ "\"\n")
+    
+          appendFile mCode "\t# PRINT STRING\n"
           appendFile mCode "\tli $v0, 4\n"
-          appendFile mCode ("\tla $a0, " ++ reg ++ "\n")
+          appendFile mCode ("\tla $a0, " ++ label ++ "\n")
+    
         PyInt _ -> do
-          appendFile mCode "\t# PRINT STATEMENT (INTEGER)\n"
+          appendFile mCode "\t# PRINT INTEGER\n"
+          loadVarToReg v "t0" mCode
           appendFile mCode "\tli $v0, 1\n"
-          appendFile mCode ("\tmove $a0, " ++ reg ++ "\n")
+          appendFile mCode "\tmove $a0, $t0\n"
+    
         PyBool _ -> do
-          appendFile mCode "\t# PRINT STATEMENT (BOOLEAN CONVERTED TO INTEGER)\n"
+          appendFile mCode "\t# PRINT BOOLEAN\n"
+          loadVarToReg v "t0" mCode
           appendFile mCode "\tli $v0, 1\n"
-          appendFile mCode ("\tmove $a0, " ++ reg ++ "\n")
+          appendFile mCode "\tmove $a0, $t0\n"
+    
         PyFloat _ -> do
-          appendFile mCode "\t# PRINT STATEMENT (FLOAT)\n"
+          appendFile mCode "\t# PRINT FLOAT\n"
+          loadVarToReg v "f0" mCode
           appendFile mCode "\tli $v0, 2\n"
-          appendFile mCode ("\tmov.s $f12, " ++ reg ++ "\n")
+          appendFile mCode "\tmov.s $f12, $f0\n"
+    
         PyVarName _ -> do
-          appendFile mCode "\t# PRINT STATEMENT (VARIABLE)\n"
+          appendFile mCode "\t# PRINT VARIABLE\n"
+          loadVarToReg v "t0" mCode
           appendFile mCode "\tli $v0, 1\n"
-          appendFile mCode ("\tmove $a0, " ++ reg ++ "\n")
+          appendFile mCode "\tmove $a0, $t0\n"
     
       appendFile mCode "\tsyscall\n\n"
+      return env
 
     PyAssign n v -> do
       -- reg <- evalToRegister v mData mCode
+      let (envMap, counter) = env
+      let envMap' = Map.insert n v envMap
+  
       appendFile mData "# ASSIGNMENT FROM TRANSLATE_STMT "
       case v of
         PyStrLit _ -> appendFile mData (n ++ ":\t.asciiz \"" ++ prettyPyVar v ++ "\"\n")
@@ -398,6 +420,8 @@ translateStmt mData mCode stmt =
     
         Unknown ->
           appendFile mData (n ++ ":\t.word 0\n")
+          
+      return (envMap', counter)
     
     PyArithStmt dest lhs op rhs -> do
       appendFile mCode "\t# ARITHMETIC OPERATION\n"
@@ -413,61 +437,84 @@ translateStmt mData mCode stmt =
     
       appendFile mData (dest ++ ": .word 0\n")
       appendFile mCode ("\tsw " ++ rd ++ ", " ++ dest ++ "\n\n")
+      return env
 
-    PyIfStmt c ifb elb elseb -> do
-      let endLabel = "end_if"
+    PyIfStmt cond ifBody elifs elseBody -> do
+      let (envMap, labelId) = env
     
+      let endLabel = "end_if_" ++ show labelId
+      let newLabelId = labelId + 1
+      
       -- check if condition
       appendFile mCode ("\t# IF CONDITION\n")
-      emitCondJump c (firstElifLabel elb elseb) mCode
+      -- emitCondJump c (firstElifLabel elb elseb) mCode
     
-      -- translate if body
-      mapM_ (translateStmt mData mCode) ifb
+      -- emit first condition jump
+      emitCondJump cond (firstLabel elifs elseBody labelId) mCode
+    
+      -- translate IF body
+      (envMap1, _) <- foldM
+        (\(e, c) stmt -> do
+            e' <- translateStmt (e, c) mData mCode stmt
+            return e'
+        )
+        (envMap, newLabelId)
+        ifBody
+    
       appendFile mCode ("\tj " ++ endLabel ++ "\n\n")
     
-      -- translate elif chain
-      mapM_
-        (\(i, (cond, body)) ->
-            let label = "elif_" ++ show i
-            in do
-              appendFile mCode ("\t# ELIF CONDITION\n")
-              appendFile mCode (label ++ ":\n")
-    
-              emitCondJump cond (nextLabel i elb elseb) mCode
-    
-              mapM_ (translateStmt mData mCode) body
-    
-              appendFile mCode ("\tj " ++ endLabel ++ "\n\n")
+      -- translate ELIF chain
+      (envMap2, finalLabelId) <- foldM
+        (\(e, c) (i, (cond, body)) -> do
+            (e', c') <- translateElif (e, c) mData mCode endLabel labelId (length elifs) (i, (cond, body))
+            return (e', c')
         )
-        (zip [0..] elb)
+        (envMap1, newLabelId)
+        (zip [0..] elifs)
     
-      -- translate else block
-      case elseb of
-        Just b -> do
-          appendFile mCode ("\t# ELSE CONDITION\n")
-          appendFile mCode "else:\n"
-          mapM_ (translateStmt mData mCode) b
+      -- translate ELSE
+      (envMapFinal, finalCounter) <- case elseBody of
+        Just body -> do
+          appendFile mCode ("else_" ++ show labelId ++ ":\n")
+          (eFinal, cFinal) <- foldM
+            (\(e, c) stmt -> do
+                e' <- translateStmt (e, c) mData mCode stmt
+                return e'
+            )
+            (envMap2, newLabelId)
+            body
+    
           appendFile mCode ("\tj " ++ endLabel ++ "\n")
-        Nothing -> return ()
+          return (eFinal, cFinal)
     
-      -- end label
+        Nothing ->
+          return (envMap2, newLabelId)
+    
       appendFile mCode (endLabel ++ ":\n")
+    
+      return (envMapFinal, finalCounter)
 
     PyUnsupported s -> do
       appendFile mCode ("\t# unsupported: " ++ s ++ "\n")
+      return env
 
 firstElifLabel :: [(PyCond, [PyStmt])] -> Maybe [PyStmt] -> String
 firstElifLabel [] (Just _) = "else"
 firstElifLabel [] Nothing  = "end_if"
 firstElifLabel _  _        = "elif_0"
 
-nextLabel :: Int -> [(PyCond, [PyStmt])] -> Maybe [PyStmt] -> String
-nextLabel i elb elseb
-  | i + 1 < length elb = "elif_" ++ show (i + 1)
+{- nextLabel :: Int -> [(PyCond, [PyStmt])] -> Maybe [PyStmt] -> Int -> String
+nextLabel i elb elseb labelId
+  | i + 1 < length elb =
+      "elif_" ++ show (i + 1) ++ "_" ++ show labelId
   | otherwise =
       case elseb of
-        Just _  -> "else"
-        Nothing -> "end_if"
+        Just _  -> "else_" ++ show labelId
+        Nothing -> "end_if_" ++ show labelId -}
+nextLabel :: Int -> Int -> String -> String
+nextLabel i len labelId
+  | i + 1 < len = "elif_" ++ show (i + 1) ++ "_" ++ show labelId
+  | otherwise    = "else_" ++ show labelId
 
 translateVariable :: String -> PyVar -> FilePath -> FilePath -> IO ()
 translateVariable name val mData mCode =
@@ -493,55 +540,68 @@ translateVariable name val mData mCode =
 -------- CONDITIONAL STATEMENTS --------
 
 -- function that translates a conditional statement
-translateIf :: PyCond -> [PyStmt] -> [(PyCond, [PyStmt])] -> Maybe [PyStmt] -> FilePath -> FilePath -> Int -> IO ()
-translateIf cond ifBody elifs elseBody mData mCode labelId = do
-  -- define final label for exiting conditional statement
-  let endLabel = "end_if_" ++ show labelId
+translateIf :: Env -> PyCond -> [PyStmt] -> [(PyCond, [PyStmt])] -> Maybe [PyStmt]
+            -> FilePath -> FilePath -> Int -> IO Env
+translateIf env cond ifBody elifs elseBody mData mCode labelId = do
 
-  -- if condition check and translation
-  emitCondJump cond (firstLabel elifs elseBody labelId) mCode
-  mapM_ (translateStmt mData mCode) ifBody
+  let endLabel = "end_if_" ++ show labelId
+      elseLabel = "else_" ++ show labelId
+
+  -- IF
+  appendFile mCode ("# IF CONDITION\n")
+  let failTarget =
+        case elifs of
+            [] -> case elseBody of
+                    Nothing -> endLabel
+                    Just _  -> "else_" ++ show labelId
+            _  -> "elif_0_" ++ show labelId
+
+  emitCondJump cond failTarget mCode
+
+  env1 <- foldM (\e s -> translateStmt e mData mCode s) env ifBody
   appendFile mCode ("\tj " ++ endLabel ++ "\n\n")
 
-  -- translate elif chain (any amount)
-  mapM_
-    (translateElif mData mCode endLabel labelId)
+  -- ELIF chain (ONLY emit code, do NOT execute)
+  let totalElifs = length elifs
+  env2 <- foldM
+    (\e pair -> translateElif e mData mCode endLabel labelId totalElifs pair)
+    env1
     (zip [0..] elifs)
 
-  -- translate else block
-  case elseBody of
+  -- ELSE
+  env3 <- case elseBody of
     Just body -> do
-      appendFile mCode ("else_" ++ show labelId ++ ":\n")
-      mapM_ (translateStmt mData mCode) body
-      appendFile mCode ("\tj " ++ endLabel ++ "\n")
-    Nothing -> return ()
+      appendFile mCode (elseLabel ++ ":\n")
+      foldM (\e s -> translateStmt e mData mCode s) env2 body
+    Nothing -> return env2
 
-  -- end label 
   appendFile mCode (endLabel ++ ":\n")
+  return env3
   
-  where
-    firstLabel :: [(PyCond, [PyStmt])] -> Maybe [PyStmt] -> Int -> String
-    firstLabel [] (Just _) i = "else_" ++ show i
-    firstLabel [] Nothing  i = "end_if_" ++ show i
-    firstLabel _ _ i        = "elif_0_" ++ show i
+firstLabel :: [(PyCond, [PyStmt])] -> Maybe [PyStmt] -> Int -> String
+firstLabel [] (Just _) i = "else_" ++ show i
+firstLabel [] Nothing  i = "end_if_" ++ show i
+firstLabel _ _ i        = "elif_0_" ++ show i
 
 -- helper for elif translation
-translateElif :: FilePath -> FilePath -> String -> Int -> (Int, (PyCond, [PyStmt])) -> IO ()
-translateElif mData mCode endLabel baseId (i, (cond, body)) = do
-  -- define first elif label
+translateElif :: Env -> FilePath -> FilePath -> String -> Int
+              -> Int -> (Int, (PyCond, [PyStmt])) -> IO Env
+translateElif env mData mCode endLabel baseId totalElifs (i, (cond, body)) = do
+
   let label = "elif_" ++ show i ++ "_" ++ show baseId
   appendFile mCode (label ++ ":\n")
-  
-  -- define other elif labels if needed
+
   let nextLabel =
-        if i + 1 < length body
+        if i + 1 < totalElifs
         then "elif_" ++ show (i + 1) ++ "_" ++ show baseId
-        else maybe ("else_" ++ show baseId) (const endLabel) (Just body)
-        
+        else "else_" ++ show baseId
+
   emitCondJump cond nextLabel mCode
-  mapM_ (translateStmt mData mCode) body
+
+  env' <- foldM (\e s -> translateStmt e mData mCode s) env body
 
   appendFile mCode ("\tj " ++ endLabel ++ "\n\n")
+  return env'
 
   {- let label = "elif_" ++ show i
   appendFile mCode (label ++ ":\n")
@@ -619,7 +679,7 @@ loadVarToReg var reg mCode = do
 
     -- translate string literal
     PyStrLit s -> do
-      -- let label = "str_const_" ++ filter (/= ' ') s
+      -- let label = "str_const_" ++ sanitizeLabel s
       -- appendFile mCode $ label ++ ": .asciiz \"" ++ s ++ "\"\n"
       -- appendFile mCode $ "\tla $" ++ reg ++ ", " ++ label ++ "\n"
       appendFile mCode $ "\tla $" ++ reg ++ ", str_const_" ++ filter (/= ' ') s ++ "\n"
@@ -657,7 +717,10 @@ main = do
   let ast = parseProgram (lines contents)
   print ast
 
-  mapM_ (translateStmt mData mCode) ast
+  -- mapM_ (translateStmt mData mCode) ast
+  _ <- foldM (\e stmt -> translateStmt e mData mCode stmt)
+           (Map.empty, 0)
+           ast
   appendFile mCode "\n\t# END PROGRAM"
   appendFile mCode "\n\tjr $ra\n"
 
