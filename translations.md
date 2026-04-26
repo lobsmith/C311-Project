@@ -67,7 +67,7 @@ No `.text` translation needed.
 
 ## Two-Operand Arithmetic
 ### Add & Subtract (+, -)
-Since there are no subtract instructions in MIPS, the instructions that correlate with addition must be used for subtraction as well.
+Since there are no native subtract instructions in MIPS, the instructions that correlate with addition must be used for subtraction as well unless pseudo-instructions are used.
 #### Two variables
 * Declare and initialize both variables (optional but is useful to track variable names in MIPS).
 * Load both values into their own registers ($t0 & $t1 or $s0 & $s1 unless float).
@@ -77,7 +77,7 @@ Since there are no subtract instructions in MIPS, the instructions that correlat
 * Load the variable value into a register.
 * Use an `addi` instruction to store the result in a second register.
 #### Two immediates
-Easiest solution: same protocol as one variable and one immediate
+Easiest solution: same protocol as one variable and one immediate.
 * Load the first value into a register.
 * Add the second value and store the result using `addi`.
 
@@ -90,27 +90,22 @@ Use `srl` instruction?
 Use `div` instruction for `//` but not `/`, store result in `mflo`.
 * Note: Both `//` and the `div` instruction round towards -∞, not zero (for example, an actual quotient of -3.8 rounds down to -4).
 ### Modulo (%)
-Use `div` instruction?
-Store result in `mfhi`.
+Use `div` instruction, store result in `mfhi`.
 * Note: The `div` instruction rounds towards -∞, not zero.
 
 ### Exponentiation (**)
-* Use looped multiplication in Haskell for this.
+* Use looped multiplication in Haskell for this (not implemented in this project).
 
 ## Conditional Statements
 Use conditional branch (jump) to a label.
 ### If-Else Statements
 ### Case Statements
 
-## Loops
-Use conditional branch (jump) to a label.
-### For Loop
-### While Loop
+## Loops (for, while)
+Use conditional branch (jump) to a label (not implemented in this project).
 
 ## Functions
-Use unconditional branch to a label.
-### Function Header
-### Function Return
+Use unconditional branch to a label (not implemented in this project).
 
 ## Exiting the Program
 Two options:
