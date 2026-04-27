@@ -79,33 +79,6 @@ isValidName (char:trimmed)
         isValidLead char = char `elem` ['a'..'z'] ++ ['A'..'Z'] ++ ['_']
         isValidFollow char = char `elem` ['a'..'z'] ++ ['A'..'Z'] ++ ['_'] ++ ['0'..'9']
 
-{- evalToRegister :: PyVar -> FilePath -> FilePath -> IO String
-evalToRegister v mData mCode =
-  case v of
-    PyInt i -> do
-      appendFile mCode ("\tli $t0, " ++ show i ++ "\n")
-      return "$t0"
-
-    PyBool b -> do
-      appendFile mCode ("\tli $t0, " ++ (if b then "1" else "0") ++ "\n")
-      return "$t0"
-
-    PyStrLit s -> do
-      let label = "strLit_" ++ sanitizeLabel s
-      appendFile mData (label ++ ": .asciiz \"" ++ s ++ "\"\n")
-      return label
-    
-    PyVarName n -> do
-      appendFile mCode ("\tlw $t0, " ++ n ++ "\n")
-      return "$t0"
-
-    PyFloat f -> do
-      appendFile mCode ("\tl.s $f0, " ++ show f ++ "\n")
-      return "$f0"
-
-    Unknown -> do
-      appendFile mCode "\tli $t0, 0\n"
-      return "$t0" -}
 evalToRegister :: PyVar -> IO String
 evalToRegister v = do
   case v of
@@ -477,7 +450,6 @@ translateStmt env mData mCode stmt =
       
       -- check if condition
       appendFile mCode ("\t# IF CONDITION\n")
-      -- emitCondJump c (firstElifLabel elb elseb) mCode
     
       -- emit first condition jump
       emitCondJump cond (firstLabel elifs elseBody labelId) mCode
@@ -533,14 +505,7 @@ firstElifLabel [] (Just _) = "else"
 firstElifLabel [] Nothing  = "end_if"
 firstElifLabel _  _        = "elif_0"
 
-{- nextLabel :: Int -> [(PyCond, [PyStmt])] -> Maybe [PyStmt] -> Int -> String
-nextLabel i elb elseb labelId
-  | i + 1 < length elb =
-      "elif_" ++ show (i + 1) ++ "_" ++ show labelId
-  | otherwise =
-      case elseb of
-        Just _  -> "else_" ++ show labelId
-        Nothing -> "end_if_" ++ show labelId -}
+
 nextLabel :: Int -> Int -> String -> String
 nextLabel i len labelId
   | i + 1 < len = "elif_" ++ show (i + 1) ++ "_" ++ show labelId
@@ -633,12 +598,6 @@ translateElif env mData mCode endLabel baseId totalElifs (i, (cond, body)) = do
   appendFile mCode ("\tj " ++ endLabel ++ "\n\n")
   return env'
 
-  {- let label = "elif_" ++ show i
-  appendFile mCode (label ++ ":\n")
-  emitCondJump cond endLabel mCode
-  mapM_ (translateStmt mData mCode) body
-  appendFile mCode ("\tj " ++ endLabel ++ "\n") -}
-
 emitCondJump :: PyCond -> String -> FilePath -> IO ()
 emitCondJump (PyCond lhs cmp rhs) failLabel mCode = do
   loadVarToReg lhs "t0" mCode
@@ -715,12 +674,8 @@ loadVarToReg var reg mCode = do
 
     -- translate string literal
     PyStrLit s -> do
-      -- let label = "str_const_" ++ sanitizeLabel s
-      -- appendFile mCode $ label ++ ": .asciiz \"" ++ s ++ "\"\n"
-      -- appendFile mCode $ "\tla $" ++ reg ++ ", " ++ label ++ "\n"
       appendFile mCode $ "\tla $" ++ reg ++ ", str_const_" ++ filter (/= ' ') s ++ "\n"
-      -- return ("strLit_" ++ filter (/= ' ') s)
-
+      
     -- translate variable name
     PyVarName name ->
       if isFloatReg then do
@@ -753,7 +708,6 @@ main = do
   let ast = parseProgram (lines contents)
   print ast
 
-  -- mapM_ (translateStmt mData mCode) ast
   _ <- foldM (\e stmt -> translateStmt e mData mCode stmt)
            (Map.empty, 0)
            ast
