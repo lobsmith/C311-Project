@@ -243,12 +243,6 @@ parseBlock indent allLines@(line:rest)
 parseStmt :: Int -> [String] -> (PyStmt, [String])
 parseStmt indent (line:rest)
   | isIfLine trimmed = parseIf indent (line:rest)
-  {- | isPrintLine trimmed =
-    case extractStringPure trimmed of
-      Just str ->
-        (PyPrint (PyStrLit str), rest)
-      Nothing ->
-        (PyPrint (parseValue (extractPrint trimmed)), rest)-} -- MAY NEED TO CHECK PY_STR_LIT vs. PY_VAR_NAME HERE
   | isArithLine trimmed =
       case extractOperands trimmed of
         Just (d,l,o,r) -> (PyArithStmt d l o r, rest)
@@ -505,7 +499,6 @@ firstElifLabel [] (Just _) = "else"
 firstElifLabel [] Nothing  = "end_if"
 firstElifLabel _  _        = "elif_0"
 
-
 nextLabel :: Int -> Int -> String -> String
 nextLabel i len labelId
   | i + 1 < len = "elif_" ++ show (i + 1) ++ "_" ++ show labelId
@@ -582,7 +575,6 @@ firstLabel _ _ i        = "elif_0_" ++ show i
 translateElif :: Env -> FilePath -> FilePath -> String -> Int
               -> Int -> (Int, (PyCond, [PyStmt])) -> IO Env
 translateElif env mData mCode endLabel baseId totalElifs (i, (cond, body)) = do
-
   let label = "elif_" ++ show i ++ "_" ++ show baseId
   appendFile mCode (label ++ ":\n")
 
@@ -711,6 +703,7 @@ main = do
   _ <- foldM (\e stmt -> translateStmt e mData mCode stmt)
            (Map.empty, 0)
            ast
+  
   appendFile mCode "\n\t# END PROGRAM"
   appendFile mCode "\n\tjr $ra\n"
 
@@ -719,4 +712,3 @@ main = do
   writeFile mFinal (dataContents ++ "\n" ++ codeContents)
 
   putStrLn "Writing to assembly.s successful"
-  
